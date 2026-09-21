@@ -14,9 +14,13 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::{
-    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
+    ActionRingAnimationSpeed, ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout,
+    ActionRingSlot,
 };
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
+
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
+use gpui_component::slider::{Slider, SliderState};
 
 use self::action_icons::action_icon_path;
 use self::editor::action_library;
@@ -27,6 +31,7 @@ use crate::ui::theme::{self, Palette, Typography as _};
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.
 pub struct ActionRingPanel {
+    animation_speed: CommitSlider<ActionRingAnimationSpeed>,
     focus_handle: FocusHandle,
     selected_slot: ActionRingSlot,
     application_input: Option<Entity<InputState>>,
@@ -41,7 +46,17 @@ impl ActionRingPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let state_obs =
             AppState::repaint_on(cx, |event| matches!(event, StateEvent::BindingsChanged(_)));
+        let animation_speed = CommitSlider::new(
+            SliderRange::new(ActionRingAnimationSpeed::MIN, ActionRingAnimationSpeed::MAX)
+                .step(ActionRingAnimationSpeed::STEP),
+            ActionRingAnimationSpeed::default(),
+            cx,
+            |_, speed, cx| {
+                AppState::apply(cx, |state| state.commit_action_ring_animation_speed(speed));
+            },
+        );
         Self {
+            animation_speed,
             focus_handle: cx.focus_handle(),
             selected_slot: ActionRingSlot::Top,
             application_input: None,
@@ -62,6 +77,11 @@ impl Render for ActionRingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
         let (ring, layout) = action_ring_editor_state(cx);
+        self.animation_speed.sync(ring.animation_speed, window, cx);
+        let speed = self
+            .animation_speed
+            .shown(ring.animation_speed)
+            .multiplier();
         let haptics_supported = current_device_supports_haptics(cx);
         let application_input = editor_input(
             &mut self.application_input,
@@ -134,30 +154,75 @@ impl Render for ActionRingPanel {
                         AppState::commit_action_ring_enabled,
                     )),
             )
+            .child(animation_speed_row(
+                self.animation_speed.slider(),
+                speed,
+                pal,
+            ))
             .when(haptics_supported, |panel| {
-                panel.child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .child(
-                            v_flex()
-                                .child(div().text_body().child(tr!("action_ring.haptic_feedback")))
-                                .child(
-                                    div()
-                                        .text_caption()
-                                        .text_color(pal.text_muted)
-                                        .child(tr!("action_ring.action_ring_haptic_description")),
-                                ),
-                        )
-                        .child(toggle_button(
-                            "ring-haptics",
-                            ring.haptics,
-                            AppState::commit_action_ring_haptics,
-                        )),
-                )
+                panel.child(haptics_row(ring.haptics, pal))
             })
     }
+}
+
+fn haptics_row(enabled: bool, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            v_flex()
+                .child(div().text_body().child(tr!("action_ring.haptic_feedback")))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("action_ring.action_ring_haptic_description")),
+                ),
+        )
+        .child(toggle_button(
+            "ring-haptics",
+            enabled,
+            AppState::commit_action_ring_haptics,
+        ))
+}
+
+fn animation_speed_row(slider: &Entity<SliderState>, speed: f32, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_body().child(tr!("action_ring.animation_speed")))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("action_ring.animation_speed_description")),
+                ),
+        )
+        .child(
+            h_flex()
+                .flex_shrink_0()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .text_caption()
+                        .child(tr!("action_ring.animation_slow")),
+                )
+                .child(div().w(px(180.)).child(Slider::new(slider)))
+                .child(
+                    div()
+                        .text_caption()
+                        .child(tr!("action_ring.animation_fast")),
+                )
+                .child(div().text_body().child(format!("{speed:.1}×"))),
+        )
 }
 
 fn action_ring_editor_state(cx: &Context<ActionRingPanel>) -> (ActionRingConfig, ActionRingLayout) {

@@ -516,6 +516,10 @@ auto_on_with_camera = "Sytytä automaattisesti kameran kanssa"
 camera_light_auto_description = "Sytyttää valon, kun jokin kamera on käytössä, ja sammuttaa sen, kun kameroita ei käytetä."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "Toimintorengas"
 action_ring_description = "Määritä osoittimen ympärillä näkyvät kahdeksan toimintoa."
 open_at_the_current_cursor_position = "Avaa osoittimen nykyiseen sijaintiin."

@@ -176,6 +176,7 @@ thread_local! {
     /// Function keys whose held action owns an accepted lifecycle. Repeated
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
+    static RING_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
 }
 
@@ -436,6 +437,7 @@ pub fn start(
     dispatcher: ActionDispatcher,
     scroll: ScrollInputHandle,
     monitor: SharedEventMonitor,
+    ring: Arc<crate::action_ring::ActionRingManager>,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -447,6 +449,13 @@ pub fn start(
 
     // Actions never run on the tap callback thread (HID CGEventTap freeze hazard).
     let action_tx = spawn_action_worker(dispatcher.clone());
+    let (ring_cancel, mut cancellations) = tokio::sync::mpsc::channel(8);
+    let cancelling = Arc::clone(&ring);
+    tokio::spawn(async move {
+        while let Some(session) = cancellations.recv().await {
+            cancelling.cancel(session);
+        }
+    });
 
     // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
     // callback must never block — see the freeze-hazard note in `macos.rs`.
@@ -455,21 +464,28 @@ pub fn start(
             monitor.record(&event);
             match event {
                 MouseEvent::Button {
+                    position,
                     id,
                     pressed,
                     device,
-                } => handle_button(
-                    id,
-                    pressed,
-                    device.as_ref(),
-                    &hooks,
-                    &dispatcher,
-                    ActionDispatchTarget::capture,
-                ),
+                } => {
+                    if ring_button(&ring, &ring_cancel, id, pressed, position, device.as_ref()) {
+                        return EventDisposition::Suppress;
+                    }
+                    handle_button(
+                        id,
+                        pressed,
+                        device.as_ref(),
+                        &hooks,
+                        &dispatcher,
+                        ActionDispatchTarget::capture,
+                    )
+                }
                 MouseEvent::Moved { delta_x, delta_y } => {
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
                 MouseEvent::CaptureInterrupted => {
+                    RING_PRESSES.with_borrow_mut(HashSet::clear);
                     HOLD.with_borrow_mut(HoldState::cancel);
                     HELD_KEYS.with_borrow_mut(HashSet::clear);
                     dispatcher.cancel_hook_thread_buttons();
@@ -481,6 +497,9 @@ pub fn start(
                     from_trackpad,
                     device,
                 } => {
+                    if delta.y() != 0.0 && ring.wants_native_scroll() {
+                        return EventDisposition::PassThrough;
+                    }
                     #[cfg(target_os = "windows")]
                     if delta.y() == 0.0
                         && let Some((button, action)) = hooks
@@ -525,6 +544,45 @@ pub fn start(
             None
         }
     }
+}
+
+/// Pair the swallowed press and release even after cancellation removed the session.
+fn ring_button(
+    ring: &crate::action_ring::ActionRingManager,
+    cancel: &tokio::sync::mpsc::Sender<u64>,
+    id: ButtonId,
+    pressed: bool,
+    position: Option<(f64, f64)>,
+    device: Option<&EventDevice>,
+) -> bool {
+    if !button_source_may_remap(device) {
+        return false;
+    }
+    if RING_PRESSES.with_borrow_mut(|held| {
+        if pressed {
+            held.contains(&id)
+        } else {
+            held.remove(&id)
+        }
+    }) {
+        return true;
+    }
+    if !pressed {
+        return false;
+    }
+    let Some((x, y)) = position else {
+        return false;
+    };
+    let Some(session) = ring.outside_session(x, y) else {
+        return false;
+    };
+    if cancel.try_send(session).is_err() {
+        return false;
+    }
+    RING_PRESSES.with_borrow_mut(|held| {
+        held.insert(id);
+    });
+    true
 }
 
 /// Resolve a native horizontal-wheel tick to a rebound thumb-wheel action.

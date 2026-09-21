@@ -340,6 +340,15 @@ impl Agent for AgentServer {
         Ok(())
     }
 
+    async fn action_ring_input_region(
+        self,
+        _: Context,
+        session_id: u64,
+        region: Option<openlogi_core::action_ring::InputRegion>,
+    ) -> bool {
+        self.action_ring.set_input_region(session_id, region)
+    }
+
     async fn action_ring_cancel(self, _: Context, session_id: u64) {
         self.action_ring.cancel(session_id);
     }

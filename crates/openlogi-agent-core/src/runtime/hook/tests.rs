@@ -402,3 +402,86 @@ fn resolve_gesture_click_falls_back_when_click_is_absent() {
         default_binding(ButtonId::Forward)
     );
 }
+
+#[test]
+fn ring_outside_click_pairs_release_after_cancel_and_never_swallows_trackpad() {
+    use crate::action_ring::{ActionRingManager, ActionRingSessionSpec};
+    use openlogi_core::{action_ring::InputRegion, binding::ActionRingConfig};
+    let ring = ActionRingManager::default();
+    let invocation = ring.begin(ActionRingSessionSpec {
+        animation_speed: openlogi_core::binding::ActionRingAnimationSpeed::default(),
+        device_key: "mouse".into(),
+        haptic_route: None,
+        layout: ActionRingConfig::default().default,
+        language: None,
+    });
+    assert!(ring.set_input_region(
+        invocation.session_id,
+        Some(InputRegion {
+            x: -360.,
+            y: 0.,
+            width: 360.,
+            height: 360.
+        })
+    ));
+    let mouse = EventDevice {
+        vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
+        ..EventDevice::default()
+    };
+    let trackpad = EventDevice {
+        product_name: Some("Apple Internal Trackpad".into()),
+        ..EventDevice::default()
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    RING_PRESSES.with_borrow_mut(HashSet::clear);
+    assert!(!ring_button(
+        &ring,
+        &tx,
+        ButtonId::LeftClick,
+        true,
+        Some((-180., 180.)),
+        Some(&mouse)
+    ));
+    assert!(!ring_button(
+        &ring,
+        &tx,
+        ButtonId::LeftClick,
+        true,
+        None,
+        Some(&mouse)
+    ));
+    assert!(ring_button(
+        &ring,
+        &tx,
+        ButtonId::LeftClick,
+        true,
+        Some((10., 10.)),
+        Some(&mouse)
+    ));
+    assert!(!ring_button(
+        &ring,
+        &tx,
+        ButtonId::LeftClick,
+        false,
+        Some((10., 10.)),
+        Some(&trackpad)
+    ));
+    ring.cancel(rx.try_recv().unwrap());
+    assert!(ring_button(
+        &ring,
+        &tx,
+        ButtonId::LeftClick,
+        false,
+        Some((10., 10.)),
+        Some(&mouse)
+    ));
+    assert!(!ring_button(
+        &ring,
+        &tx,
+        ButtonId::LeftClick,
+        true,
+        Some((10., 10.)),
+        Some(&mouse)
+    ));
+    assert!(RING_PRESSES.with_borrow(HashSet::is_empty));
+}

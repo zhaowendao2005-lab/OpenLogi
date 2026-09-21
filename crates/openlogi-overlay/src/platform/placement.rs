@@ -7,6 +7,7 @@ use crate::ring::{WINDOW_SIZE, clamp_window_origin, ring_window_options};
 /// Captured placement for one invocation, before its window is opened.
 pub(crate) struct RingPlacement {
     display_id: Option<DisplayId>,
+    event_origin: Option<(f64, f64)>,
     bounds: Bounds<Pixels>,
 }
 
@@ -27,6 +28,7 @@ impl RingPlacement {
         let native_display = cursor
             .as_ref()
             .and_then(|cursor| super::display_containing(cursor.x, cursor.y));
+        let event_origin = native_display.as_ref().map(|display| display.origin);
         let (display_id, center, display_bounds) =
             if let (Some(cursor), Some(display)) = (&cursor, native_display) {
                 (
@@ -63,6 +65,7 @@ impl RingPlacement {
             clamp_window_origin(desired_origin, size, display_bounds)
         });
         Ok(Self {
+            event_origin,
             bounds: Bounds::new(origin, size),
             display_id,
         })
@@ -76,13 +79,23 @@ impl RingPlacement {
         }
     }
 
-    #[expect(
-        clippy::unnecessary_wraps,
-        clippy::unused_self,
-        reason = "the Windows implementation consumes the captured geometry and can fail"
-    )]
-    pub(crate) fn show(self, _window: &mut gpui::Window) -> anyhow::Result<()> {
-        super::configure_windows();
-        Ok(())
+    pub(crate) fn show(
+        self,
+        handle: gpui::WindowHandle<crate::ring::RingView>,
+        cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<()> {
+        handle.update(cx, |view, window, cx| {
+            super::configure_windows();
+            if let Some((x, y)) = self.event_origin {
+                let bounds = window.bounds();
+                view.publish_input_region(openlogi_core::action_ring::InputRegion {
+                    x: x + f64::from(f32::from(bounds.origin.x)), y: y + f64::from(f32::from(bounds.origin.y)),
+                    width: f64::from(f32::from(bounds.size.width)), height: f64::from(f32::from(bounds.size.height)),
+                });
+            } else {
+                tracing::debug!("Actions Ring outside-click interception unavailable: native event coordinates are not available");
+            }
+            view.present(cx);
+        })
     }
 }

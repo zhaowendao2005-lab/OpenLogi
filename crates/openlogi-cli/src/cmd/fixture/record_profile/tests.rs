@@ -242,6 +242,16 @@ impl Agent for TestAgent {
         unreachable!("profile capture must not drive the Actions Ring")
     }
 
+    async fn action_ring_input_region(
+        self,
+        _: TarpcContext,
+        session_id: u64,
+        region: Option<openlogi_core::action_ring::InputRegion>,
+    ) -> bool {
+        let _ = (session_id, region);
+        false
+    }
+
     async fn action_ring_cancel(self, _: TarpcContext, _session_id: u64) {
         unreachable!("profile capture must not drive the Actions Ring")
     }

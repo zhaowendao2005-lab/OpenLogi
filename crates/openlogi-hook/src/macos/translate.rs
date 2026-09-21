@@ -88,21 +88,25 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
     }
     match etype {
         CGEventType::LeftMouseDown => Some(MouseEvent::Button {
+            position: Some((event.location().x, event.location().y)),
             id: ButtonId::LeftClick,
             pressed: true,
             device: button_source(event),
         }),
         CGEventType::LeftMouseUp => Some(MouseEvent::Button {
+            position: Some((event.location().x, event.location().y)),
             id: ButtonId::LeftClick,
             pressed: false,
             device: button_source(event),
         }),
         CGEventType::RightMouseDown => Some(MouseEvent::Button {
+            position: Some((event.location().x, event.location().y)),
             id: ButtonId::RightClick,
             pressed: true,
             device: button_source(event),
         }),
         CGEventType::RightMouseUp => Some(MouseEvent::Button {
+            position: Some((event.location().x, event.location().y)),
             id: ButtonId::RightClick,
             pressed: false,
             device: button_source(event),
@@ -110,6 +114,7 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
         CGEventType::OtherMouseDown => {
             let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
             button_number_to_id(n).map(|id| MouseEvent::Button {
+                position: Some((event.location().x, event.location().y)),
                 id,
                 pressed: true,
                 device: button_source(event),
@@ -118,6 +123,7 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
         CGEventType::OtherMouseUp => {
             let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
             button_number_to_id(n).map(|id| MouseEvent::Button {
+                position: Some((event.location().x, event.location().y)),
                 id,
                 pressed: false,
                 device: button_source(event),

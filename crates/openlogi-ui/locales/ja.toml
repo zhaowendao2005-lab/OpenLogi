@@ -516,6 +516,10 @@ auto_on_with_camera = "カメラ使用時に自動点灯"
 camera_light_auto_description = "いずれかのカメラを使用している間はライトを点灯し、すべてのカメラが停止すると消灯します。"
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "アクションリング"
 action_ring_description = "ポインタの周囲に表示する8つのアクションを設定します。"
 open_at_the_current_cursor_position = "現在のポインタ位置に開きます。"

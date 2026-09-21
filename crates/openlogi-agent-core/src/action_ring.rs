@@ -33,6 +33,8 @@ const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE
 
 /// Immutable input used to open one ring session.
 pub struct ActionRingSessionSpec {
+    /// Device-wide appearance and dismissal playback speed.
+    pub animation_speed: openlogi_core::binding::ActionRingAnimationSpeed,
     /// Config key of the device whose control opened the ring.
     pub device_key: String,
     /// HID++ route used for feedback when both config and capabilities allow it.
@@ -67,6 +69,16 @@ struct Session {
     actions: BTreeMap<ActionRingSlot, Action>,
     hovered: Option<ActionRingSlot>,
     opened_at: Instant,
+    input_region: Option<(openlogi_core::action_ring::InputRegion, Instant)>,
+}
+
+impl Session {
+    fn live_input_region(&self, now: Instant) -> Option<openlogi_core::action_ring::InputRegion> {
+        let (region, renewed) = self.input_region?;
+        (now.saturating_duration_since(self.opened_at) <= SESSION_LIFETIME
+            && now.saturating_duration_since(renewed) < openlogi_core::action_ring::INPUT_LEASE)
+            .then_some(region)
+    }
 }
 
 #[derive(Default)]
@@ -140,6 +152,7 @@ impl ActionRingManager {
             actions.insert(slot, action);
         }
         let invocation = ActionRingInvocation {
+            animation_speed: spec.animation_speed,
             session_id,
             slots,
             language: spec.language,
@@ -152,6 +165,7 @@ impl ActionRingManager {
             actions,
             hovered: None,
             opened_at: Instant::now(),
+            input_region: None,
         });
         self.publish(&state);
         invocation
@@ -276,6 +290,52 @@ impl ActionRingManager {
         self.publish(&state);
     }
 
+    /// Renew only the showing session's input grant. Invalid geometry disarms it.
+    pub fn set_input_region(
+        &self,
+        session_id: u64,
+        region: Option<openlogi_core::action_ring::InputRegion>,
+    ) -> bool {
+        let mut state = self.state();
+        let Ok(session) = state.active_session(session_id) else {
+            return false;
+        };
+        session.input_region = region.filter(|r| r.is_valid()).map(|r| (r, Instant::now()));
+        true
+    }
+
+    /// Nonblocking input-hook decision. Missing, stale or contended state fails open.
+    pub fn outside_session(&self, x: f64, y: f64) -> Option<u64> {
+        self.outside_session_at(x, y, Instant::now())
+    }
+
+    fn outside_session_at(&self, x: f64, y: f64, now: Instant) -> Option<u64> {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        let state = self.state.try_lock().ok()?;
+        let session = state.active.as_ref()?;
+        let region = session.live_input_region(now)?;
+        if region.contains(x, y) {
+            return None;
+        }
+        Some(session.invocation.session_id)
+    }
+
+    /// Keep native vertical wheel events available to the ring instead of smoothing them.
+    pub fn wants_native_scroll(&self) -> bool {
+        self.state
+            .try_lock()
+            .ok()
+            .and_then(|state| {
+                state
+                    .active
+                    .as_ref()
+                    .and_then(|session| session.live_input_region(Instant::now()))
+            })
+            .is_some()
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -288,6 +348,7 @@ mod tests {
 
     fn spec() -> ActionRingSessionSpec {
         ActionRingSessionSpec {
+            animation_speed: openlogi_core::binding::ActionRingAnimationSpeed::default(),
             device_key: "mouse-a".to_string(),
             haptic_route: None,
             layout: ActionRingConfig::default().default,
@@ -442,5 +503,41 @@ mod tests {
             manager.activate(invocation.session_id, ActionRingSlot::Top),
             Err(ActionRingCommandError::SessionNotFound)
         ));
+    }
+    #[test]
+    fn input_region_is_scoped_validated_and_expires_fail_open() {
+        use openlogi_core::action_ring::{INPUT_LEASE, InputRegion};
+        let manager = ActionRingManager::default();
+        let first = manager.begin(spec());
+        let region = InputRegion {
+            x: -540.,
+            y: 0.,
+            width: 540.,
+            height: 540.,
+        };
+        assert!(manager.set_input_region(first.session_id, Some(region)));
+        assert_eq!(manager.outside_session(-200., 200.), None);
+        assert_eq!(manager.outside_session(1., 200.), Some(first.session_id));
+        assert_eq!(
+            manager.outside_session_at(1., 200., Instant::now() + INPUT_LEASE),
+            None
+        );
+        let next = manager.begin(spec());
+        assert!(!manager.set_input_region(first.session_id, Some(region)));
+        assert_eq!(manager.outside_session(1., 200.), None);
+        assert!(manager.set_input_region(next.session_id, Some(region)));
+        manager.cancel(first.session_id);
+        assert_eq!(manager.outside_session(1., 200.), Some(next.session_id));
+        assert!(manager.set_input_region(
+            next.session_id,
+            Some(InputRegion {
+                width: f64::NAN,
+                ..region
+            })
+        ));
+        assert_eq!(manager.outside_session(1., 200.), None);
+        assert!(manager.set_input_region(next.session_id, Some(region)));
+        manager.cancel(next.session_id);
+        assert_eq!(manager.outside_session(1., 200.), None);
     }
 }

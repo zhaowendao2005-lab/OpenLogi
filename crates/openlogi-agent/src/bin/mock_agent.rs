@@ -756,6 +756,16 @@ impl Agent for MockAgent {
         Err(ActionRingCommandError::SessionNotFound)
     }
 
+    async fn action_ring_input_region(
+        self,
+        _: Context,
+        session_id: u64,
+        region: Option<openlogi_core::action_ring::InputRegion>,
+    ) -> bool {
+        let _ = (session_id, region);
+        false
+    }
+
     async fn action_ring_cancel(self, _: Context, _session_id: u64) {}
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {

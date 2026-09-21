@@ -516,6 +516,10 @@ auto_on_with_camera = "Kamerayla otomatik aç"
 camera_light_auto_description = "Herhangi bir kamera kullanılırken bu ışığı aç, kameralar durunca kapat."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "Eylem Halkası"
 action_ring_description = "İmlecin çevresinde gösterilen sekiz eylemi yapılandırın."
 open_at_the_current_cursor_position = "Geçerli imleç konumunda aç."

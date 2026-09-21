@@ -45,6 +45,15 @@ impl RingPlacement {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) use native::release_pointer;
+
+#[cfg(target_os = "windows")]
+pub(crate) use native::hide;
+
+#[cfg(target_os = "windows")]
+pub(crate) use native::warp_cursor;
+
 #[cfg(test)]
 mod tests {
     use super::*;

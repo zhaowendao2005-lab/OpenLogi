@@ -63,7 +63,7 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -393,6 +393,8 @@ pub struct ActionRingInvocation {
     pub slots: BTreeMap<ActionRingSlot, ActionRingPresentation>,
     /// Configured UI locale, or `None` to follow the overlay host's system locale.
     pub language: Option<String>,
+    /// Playback speed snapshotted when the session opened.
+    pub animation_speed: openlogi_core::binding::ActionRingAnimationSpeed,
 }
 
 /// The ring the overlay should be showing, stamped with its generation.
@@ -566,4 +568,9 @@ pub trait Agent {
     async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
     /// Read the current keyboard-backlight state from `route`.
     async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
+    /// Renew or remove the current overlay's native input region. Stale sessions are rejected.
+    async fn action_ring_input_region(
+        session_id: u64,
+        region: Option<openlogi_core::action_ring::InputRegion>,
+    ) -> bool;
 }

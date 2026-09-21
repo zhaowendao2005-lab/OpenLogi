@@ -516,6 +516,10 @@ auto_on_with_camera = "Автоувімкнення разом із камеро
 camera_light_auto_description = "Вмикати це світло, поки використовується будь-яка камера, і вимикати, коли камери зупиняються."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "Кільце дій"
 action_ring_description = "Налаштуйте вісім дій, що показуються навколо курсора."
 open_at_the_current_cursor_position = "Відкривати в поточній позиції курсора."

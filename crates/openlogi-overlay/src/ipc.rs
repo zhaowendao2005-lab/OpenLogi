@@ -25,6 +25,9 @@ use tracing::{debug, info, warn};
 
 use crate::session::allegiance;
 
+mod region;
+pub(crate) use region::{RegionLease, RegionPublisher};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayCommand {
     Hover {
@@ -48,6 +51,7 @@ impl OverlayCommand {
 
 /// What the view holds to talk to the agent.
 pub(crate) struct Handle {
+    pub(crate) regions: RegionPublisher,
     /// The ring the agent says should be showing, each time that changes.
     /// `None` is no ring — including a dismissal, which is why there is no
     /// separate "close" message to recognise.
@@ -59,13 +63,15 @@ pub(crate) struct Handle {
 /// Spawn the IPC client thread. Returns immediately; the thread connects (and
 /// reconnects) on its own.
 pub(crate) fn spawn() -> Handle {
+    let (regions, region_rx) = region::channel();
     let (invocation_tx, invocations) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
             tokio::join!(
                 observe_invocations(invocation_tx),
-                send_commands(&mut command_rx)
+                send_commands(&mut command_rx),
+                region::run(region_rx)
             );
         });
     });
@@ -73,6 +79,7 @@ pub(crate) fn spawn() -> Handle {
         warn!(%error, "overlay IPC client thread could not start");
     }
     Handle {
+        regions,
         invocations,
         commands,
     }

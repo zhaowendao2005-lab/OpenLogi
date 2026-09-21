@@ -178,6 +178,7 @@ mod tests {
         let m = EventMonitor::default();
         // Off by default: a press before any poll is not buffered.
         m.record(&MouseEvent::Button {
+            position: None,
             id: ButtonId::Back,
             pressed: true,
             device: None,
@@ -194,6 +195,7 @@ mod tests {
             delta_y: 5,
         });
         m.record(&MouseEvent::Button {
+            position: None,
             id: ButtonId::Forward,
             pressed: false,
             device: None,

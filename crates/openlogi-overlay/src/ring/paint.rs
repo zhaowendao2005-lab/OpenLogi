@@ -5,14 +5,24 @@
 //! drawing; readable text and the cancel target retain native utility sizing.
 
 use gpui::{
-    App, Bounds, Hsla, IntoElement, ParentElement, PathBuilder, Pixels, SharedString, Styled,
-    Window, div, point, px, rgb, svg,
+    App, Bounds, Hsla, IntoElement, ParentElement, Pixels, SharedString, Styled, Window, div,
+    point, px, rgb, svg,
 };
 use openlogi_core::binding::ActionRingSlot;
 
-use super::geometry::{Geometry, PixelGrid, Pose, slot_angle};
-use super::masks::WedgeMasks;
+use super::geometry::{CANCEL_SIZE, Geometry, PixelGrid, Pose};
+use super::masks::RingMasks;
 use super::motion::{Frame, SectorFrame};
+
+/// One slot's content box and its contents, in the same fixed logical pixels as
+/// the reference geometry. The icon's horizontal offset is derived from these
+/// rather than written out, so a resized icon stays centred in the box.
+const CONTENT_WIDTH: f32 = 60.0;
+const CONTENT_HEIGHT: f32 = 56.0;
+const ICON_SIZE: f32 = 20.0;
+const ICON_TOP: f32 = 13.0;
+const LABEL_SIZE: f32 = 11.0;
+const LABEL_LINE_HEIGHT: f32 = 15.0;
 
 #[derive(Clone, Copy)]
 pub(super) struct Palette {
@@ -43,14 +53,12 @@ pub(super) fn surface(
     area: Bounds<Pixels>,
     enabled: [bool; 8],
     frame: Frame,
-    masks: &WedgeMasks,
+    masks: &RingMasks,
     window: &mut Window,
     cx: &App,
 ) {
-    let geometry = Geometry::new(area);
     let palette = Palette::ring();
-    let grid = PixelGrid::new(window.scale_factor());
-    guides(geometry, grid, frame.guides_opacity, palette, window);
+    masks.paint_guides(area, frame.guides, palette.guide, window, cx);
     for slot in ActionRingSlot::ALL {
         if !enabled[slot.index()] {
             continue;
@@ -59,7 +67,7 @@ pub(super) fn surface(
         if sector.pose.opacity <= 0.0 {
             continue;
         }
-        masks.paint(
+        masks.paint_wedge(
             slot,
             area,
             sector.pose,
@@ -76,79 +84,19 @@ pub(super) fn surface(
         );
     }
     if frame.pointer_opacity > 0.0 {
-        let pose = Pose {
-            rotation: frame.pointer_angle,
-            ..Pose::REST
-        };
-        let tip = geometry.point(223.0, 0.0, pose);
-        let mut pointer = PathBuilder::fill();
-        pointer.move_to(geometry.point(231.0, -1.5, pose));
-        pointer.line_to(geometry.point(231.0, 1.5, pose));
-        pointer.line_to(tip);
-        pointer.close();
-        path(
-            pointer,
-            palette.selected.opacity(frame.pointer_opacity),
+        masks.paint_pointer(
+            area,
+            Pose {
+                rotation: frame.pointer_angle,
+                opacity: frame.pointer_opacity,
+                ..Pose::REST
+            },
+            [palette.selected, palette.guide],
             window,
+            cx,
         );
-        let width = grid.stroke_width(geometry.length(1.0));
-        let mut stem = PathBuilder::stroke(width);
-        let (start, end) = grid.line(
-            geometry.point(217.0, 0.0, pose),
-            geometry.point(209.0, 0.0, pose),
-            width,
-        );
-        stem.move_to(start);
-        stem.line_to(end);
-        path(stem, palette.guide.opacity(frame.pointer_opacity), window);
     }
 }
-
-fn guides(
-    geometry: Geometry,
-    grid: PixelGrid,
-    opacity: f32,
-    palette: Palette,
-    window: &mut Window,
-) {
-    for (radius, dashed) in [(235.0, false), (216.0, true), (78.0, false)] {
-        let mut circle = PathBuilder::stroke(grid.stroke_width(geometry.length(0.65)));
-        if dashed {
-            circle = circle.dash_array(&[geometry.length(2.0), geometry.length(5.0)]);
-        }
-        geometry.circle(radius, &mut circle);
-        path(circle, palette.guide.opacity(0.6 * opacity), window);
-    }
-    let width = grid.stroke_width(geometry.length(1.0));
-    let mut ticks = PathBuilder::stroke(width);
-    for i in 0_u16..80 {
-        let major = i % 10 == 0;
-        let angle = f32::from(i) * 4.5;
-        let (start, end) = grid.line(
-            geometry.point(if major { 239.0 } else { 240.0 }, angle, Pose::REST),
-            geometry.point(if major { 248.0 } else { 244.0 }, angle, Pose::REST),
-            width,
-        );
-        ticks.move_to(start);
-        ticks.line_to(end);
-    }
-    path(ticks, palette.guide.opacity(0.85 * opacity), window);
-    let mut spokes = PathBuilder::stroke(grid.stroke_width(geometry.length(0.7)));
-    for slot in ActionRingSlot::ALL {
-        let angle = slot_angle(slot) + 22.5;
-        spokes.move_to(geometry.point(80.0, angle, Pose::REST));
-        spokes.line_to(geometry.point(230.0, angle, Pose::REST));
-    }
-    path(spokes, palette.guide.opacity(0.45 * opacity), window);
-}
-
-fn path(builder: PathBuilder, color: Hsla, window: &mut Window) {
-    match builder.build() {
-        Ok(path) => window.paint_path(path, color),
-        Err(error) => tracing::warn!(?error, "could not tessellate Actions Ring path"),
-    }
-}
-
 pub(super) fn slot_content(
     geometry: Geometry,
     slot: ActionRingSlot,
@@ -161,8 +109,14 @@ pub(super) fn slot_content(
     let center = geometry.content_center(slot, frame.pose);
     let scale = frame.content_scale * frame.pose.scale;
     let align = |position| stationary_grid.map_or(position, |grid| grid.snap(position));
-    let origin = align(center - point(px(30.0 * scale), px(28.0 * scale)));
-    let icon_origin = align(origin + point(px(19.0 * scale), px(13.0 * scale))) - origin;
+    let origin = align(center - point(px(CONTENT_WIDTH / 2.0 * scale), px(28.0 * scale)));
+    let icon_origin = align(
+        origin
+            + point(
+                px((CONTENT_WIDTH - ICON_SIZE) / 2.0 * scale),
+                px(ICON_TOP * scale),
+            ),
+    ) - origin;
     let title_origin = align(origin + point(px(0.0), px(40.0 * scale))) - origin;
     let foreground = palette
         .foreground
@@ -174,8 +128,8 @@ pub(super) fn slot_content(
         .absolute()
         .left(origin.x)
         .top(origin.y)
-        .w(px(60.0 * scale))
-        .h(px(56.0 * scale))
+        .w(px(CONTENT_WIDTH * scale))
+        .h(px(CONTENT_HEIGHT * scale))
         .opacity(frame.pose.opacity)
         .text_color(foreground)
         .child(
@@ -194,7 +148,7 @@ pub(super) fn slot_content(
                 .absolute()
                 .left(icon_origin.x)
                 .top(icon_origin.y)
-                .size(px(22.0 * scale))
+                .size(px(ICON_SIZE * scale))
                 .path(icon)
                 .text_color(foreground),
         )
@@ -204,31 +158,45 @@ pub(super) fn slot_content(
                 .top(title_origin.y)
                 .w_full()
                 .text_center()
-                .text_size(px(12.0 * scale))
-                .line_height(px(16.0 * scale))
+                .text_size(px(LABEL_SIZE * scale))
+                .line_height(px(LABEL_LINE_HEIGHT * scale))
                 .truncate()
                 .child(label),
         )
 }
 
-pub(super) fn cancel(selected: bool) -> gpui::Stateful<gpui::Div> {
+pub(super) fn cancel(selected: bool, masks: &RingMasks) -> gpui::Stateful<gpui::Div> {
     use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
     let palette = Palette::ring();
+    let [fill, outline] = masks.cancel_layers();
     div()
         .id("ring-cancel")
+        .group("ring-cancel")
         .aria_label(rust_i18n::t!("common.cancel").into_owned())
         .absolute()
-        .left(px(super::WINDOW_SIZE / 2.0 - 24.0))
-        .top(px(super::WINDOW_SIZE / 2.0 - 24.0))
-        .size(px(48.0))
+        .left(px((super::WINDOW_SIZE - CANCEL_SIZE) / 2.0))
+        .top(px((super::WINDOW_SIZE - CANCEL_SIZE) / 2.0))
+        .size(px(CANCEL_SIZE))
         .rounded_full()
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.plate)
         .flex()
         .items_center()
         .justify_center()
-        .hover(|style| style.border_color(palette.selected))
+        .child(
+            fill.absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .text_color(palette.plate),
+        )
+        .child(
+            outline
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .text_color(palette.border)
+                .group_hover("ring-cancel", |style| style.text_color(palette.selected)),
+        )
         .child(
             svg()
                 .path(openlogi_ui::action_icons::RING_CANCEL_ICON)
@@ -241,7 +209,7 @@ pub(super) fn cancel(selected: bool) -> gpui::Stateful<gpui::Div> {
         )
 }
 
-pub(super) fn hover_label(label: SharedString) -> impl IntoElement {
+pub(super) fn hover_label(label: SharedString) -> gpui::Div {
     let palette = Palette::ring();
     div()
         .absolute()

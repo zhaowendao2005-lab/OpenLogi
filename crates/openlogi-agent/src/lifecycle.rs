@@ -460,6 +460,7 @@ impl Running {
             self.inputs.dispatcher.clone(),
             self.inputs.scroll_input.clone(),
             Arc::clone(&self.event_monitor),
+            Arc::clone(&self.inputs.ring),
         )
     }
 

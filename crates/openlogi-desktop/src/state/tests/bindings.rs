@@ -414,3 +414,80 @@ fn gesture_maps_cover_every_gesture_mode_button() {
         "a promoted OS-hook button gets its own menu simultaneously"
     );
 }
+
+#[test]
+fn action_ring_animation_speed_is_device_wide_not_an_application_override() {
+    use openlogi_core::binding::ActionRingAnimationSpeed;
+    let mut state = state_with_a_known_mouse();
+    let speed = ActionRingAnimationSpeed::try_new(150).unwrap();
+    let _ = state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+    let _ = state.commit_action_ring_animation_speed(speed);
+    assert_eq!(state.current_action_ring().animation_speed, speed);
+    assert!(state.current_action_ring().per_app.is_empty());
+    let _ = state.set_editing_action_ring_app(None);
+    assert_eq!(state.current_action_ring().animation_speed, speed);
+}
+
+/// Isolated native visual proof: uses ephemeral state and never connects to an agent.
+#[test]
+#[ignore = "opens a native settings window for light/dark visual inspection"]
+fn action_ring_settings_native_preview() {
+    use crate::features::action_ring::ActionRingPanel;
+    use crate::ui::theme;
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        Window, WindowBounds, WindowOptions, div, px, size,
+    };
+    use gpui_component::{ActiveTheme as _, Root, Theme, ThemeMode};
+
+    struct Preview(Entity<ActionRingPanel>);
+    impl Render for Preview {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .p_6()
+                .bg(cx.theme().background)
+                .child(self.0.clone())
+        }
+    }
+    gpui_platform::application()
+        .with_assets(crate::app_assets::AppAssets)
+        .with_quit_mode(gpui::QuitMode::Explicit)
+        .run(|cx| {
+            gpui_component::init(cx);
+            theme::register_builtin_themes(cx);
+            openlogi_core::locale::activate(Some("zh-CN"));
+            let state = cx.new(|_| state_with_a_known_mouse());
+            AppState::set_global(state, cx);
+            let bounds = gpui::Bounds::centered(None, size(px(780.), px(720.)), cx);
+            let handle = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        ..WindowOptions::default()
+                    },
+                    |window, cx| {
+                        let panel = cx.new(ActionRingPanel::new);
+                        let preview = cx.new(|_| Preview(panel));
+                        cx.new(|cx| Root::new(preview, window, cx))
+                    },
+                )
+                .unwrap();
+            cx.spawn(async move |cx| {
+                for (name, mode) in [("light", ThemeMode::Light), ("dark", ThemeMode::Dark)] {
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        Theme::change(mode, Some(window), cx);
+                    })
+                    .unwrap();
+                    eprintln!("previewing ring settings: {name}");
+                    // The Windows GPUI backend has no render_to_image; capture the native
+                    // window externally during this explicit manual-inspection interval.
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(15))
+                        .await;
+                }
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+}

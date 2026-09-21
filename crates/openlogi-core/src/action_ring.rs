@@ -1,4 +1,4 @@
-//! The Actions Ring's shared display-duration constant.
+//! Shared Actions Ring timing and native input-region vocabulary.
 //!
 //! The ring's runtime session state (`ActionRingManager`: `Mutex`, `Notify`,
 //! `Instant`) is agent-only and stays in `openlogi-agent-core` — it is not a
@@ -15,3 +15,39 @@ use std::time::Duration;
 /// session that has to outlive it is derived from it rather than kept in step
 /// by hand.
 pub const DISPLAY_LIFETIME: Duration = Duration::from_secs(15);
+
+/// A short renewable grant, so an unresponsive overlay cannot retain input interception.
+pub const INPUT_LEASE: Duration = Duration::from_secs(2);
+/// Renewal cadence owned alongside the lease.
+pub const INPUT_RENEWAL: Duration = Duration::from_millis(500);
+
+/// Native event-coordinate rectangle (physical pixels on Windows, points on macOS).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InputRegion {
+    /// Left edge in the native event coordinate space.
+    pub x: f64,
+    /// Top edge in the native event coordinate space.
+    pub y: f64,
+    /// Width in native event units.
+    pub width: f64,
+    /// Height in native event units.
+    pub height: f64,
+}
+impl InputRegion {
+    /// Reject malformed geometry rather than intercept unrelated clicks.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        [self.x, self.y, self.width, self.height]
+            .into_iter()
+            .all(f64::is_finite)
+            && self.width > 0.0
+            && self.height > 0.0
+            && (self.x + self.width).is_finite()
+            && (self.y + self.height).is_finite()
+    }
+    /// Whether a native pointer location is inside this rectangle.
+    #[must_use]
+    pub fn contains(self, x: f64, y: f64) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+}

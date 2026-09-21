@@ -516,6 +516,10 @@ auto_on_with_camera = "Автовключение с камерой"
 camera_light_auto_description = "Включать свет при использовании любой камеры и выключать, когда камеры неактивны."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "Кольцо действий"
 action_ring_description = "Настройте восемь действий, отображаемых вокруг указателя."
 open_at_the_current_cursor_position = "Открывать в текущем положении указателя."

@@ -2,7 +2,7 @@
 //! hidden, then place and reveal the ring without activating it.
 
 use anyhow::{Context as _, Result, ensure};
-use gpui::{App, Bounds, DevicePixels, DisplayId, Window, point, size};
+use gpui::{App, Bounds, DevicePixels, DisplayId, point, size};
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 use windows_sys::Win32::Foundation::{GetLastError, HWND, POINT, SetLastError};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -11,8 +11,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_STYLE, GetCursorPos, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_POPUP, WS_THICKFRAME,
+    GWL_STYLE, GetCursorPos, GetWindowLongW, GetWindowRect, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_POPUP,
+    WS_THICKFRAME,
 };
 
 use super::RingPlacement;
@@ -68,15 +69,24 @@ impl RingPlacement {
         unsafe_code,
         reason = "borrow the live GPUI HWND on its owning UI thread"
     )]
-    pub(crate) fn show(self, window: &mut Window) -> Result<()> {
-        let RawWindowHandle::Win32(handle) = window
-            .window_handle()
-            .map_err(|error| anyhow::anyhow!("get ring HWND: {error}"))?
-            .as_raw()
-        else {
-            anyhow::bail!("ring window has no Win32 handle");
-        };
-        let hwnd = handle.hwnd.get() as HWND;
+    pub(crate) fn show(
+        self,
+        handle: gpui::WindowHandle<crate::ring::RingView>,
+        cx: &mut gpui::AsyncApp,
+    ) -> Result<()> {
+        // Return the native handle before invoking Win32: SetWindowPos sends
+        // synchronous resize/move callbacks that need to borrow App themselves.
+        let hwnd = handle.update(cx, |_, window, _| -> Result<HWND> {
+            let RawWindowHandle::Win32(handle) = window
+                .window_handle()
+                .map_err(|error| anyhow::anyhow!("get ring HWND: {error}"))?
+                .as_raw()
+            else {
+                anyhow::bail!("ring window has no Win32 handle");
+            };
+            Ok(handle.hwnd.get() as HWND)
+        })??;
+        // No await or message-pump gap: the window remains owned on this thread.
         // GPUI creates PopUp with a zero style, which Windows promotes to an
         // overlapped window with a caption/non-client frame. Establish a real
         // popup before DPI negotiation so the requested bounds are all client area.
@@ -108,7 +118,22 @@ impl RingPlacement {
             hwnd,
             self.bounds(dpi),
             SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
-        )
+        )?;
+        let mut rect = windows_sys::Win32::Foundation::RECT::default();
+        ensure!(
+            // SAFETY: the window is still owned on this thread and rect is writable.
+            unsafe { GetWindowRect(hwnd, &raw mut rect) } != 0,
+            "could not read ring input region"
+        );
+        handle.update(cx, |view, _, cx| {
+            view.publish_input_region(openlogi_core::action_ring::InputRegion {
+                x: f64::from(rect.left),
+                y: f64::from(rect.top),
+                width: f64::from(rect.right - rect.left),
+                height: f64::from(rect.bottom - rect.top),
+            });
+            view.present(cx);
+        })
     }
 }
 
@@ -167,6 +192,87 @@ fn set_borderless_popup(hwnd: HWND) -> Result<()> {
     if previous == 0 && error != 0 {
         return Err(std::io::Error::from_raw_os_error(error.cast_signed()))
             .context("remove ring window frame");
+    }
+    Ok(())
+}
+
+#[expect(
+    unsafe_code,
+    reason = "set click-through on the borrowed live overlay HWND"
+)]
+pub(crate) fn release_pointer(window: &gpui::Window) -> Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, WS_EX_TRANSPARENT};
+    let RawWindowHandle::Win32(handle) = raw_window_handle::HasWindowHandle::window_handle(window)
+        .map_err(|error| anyhow::anyhow!("get ring HWND: {error}"))?
+        .as_raw()
+    else {
+        anyhow::bail!("ring window has no Win32 handle");
+    };
+    let hwnd = handle.hwnd.get() as HWND;
+    // SAFETY: the live window is borrowed on its owning thread; only the input
+    // transparency bit changes. No geometry API or synchronous resize is invoked.
+    let error = unsafe {
+        SetLastError(0);
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let error = GetLastError();
+        if style == 0 && error != 0 {
+            return Err(std::io::Error::from_raw_os_error(error.cast_signed()))
+                .context("read ring extended style");
+        }
+        SetLastError(0);
+        SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT.cast_signed());
+        GetLastError()
+    };
+    if error != 0 {
+        return Err(std::io::Error::from_raw_os_error(error.cast_signed()))
+            .context("release ring pointer input");
+    }
+    Ok(())
+}
+
+#[expect(
+    unsafe_code,
+    reason = "hide the owned HWND after ending the GPUI borrow"
+)]
+pub(crate) fn hide(handle: gpui::AnyWindowHandle, cx: &mut gpui::AsyncApp) -> Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+    let hwnd = handle.update(cx, |_, window, _| -> Result<HWND> {
+        let RawWindowHandle::Win32(handle) = window
+            .window_handle()
+            .map_err(|error| anyhow::anyhow!("get ring HWND: {error}"))?
+            .as_raw()
+        else {
+            anyhow::bail!("ring window has no Win32 handle");
+        };
+        Ok(handle.hwnd.get() as HWND)
+    })??;
+    // SAFETY: no yield since borrowing the handle; callbacks may now borrow App.
+    unsafe {
+        ShowWindow(hwnd, SW_HIDE);
+    }
+    Ok(())
+}
+
+/// Move the cursor in physical screen pixels, the space the ring's input
+/// region is published in. This process is PerMonitorV2-aware, so no further
+/// DPI translation applies.
+#[expect(
+    unsafe_code,
+    reason = "SetCursorPos takes screen coordinates by value and no buffer"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "screen coordinates are bounded by the virtual desktop"
+)]
+pub(crate) fn warp_cursor(x: f64, y: f64) -> Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos;
+    ensure!(
+        x.is_finite() && y.is_finite(),
+        "cursor target is not finite"
+    );
+    // SAFETY: no pointer arguments; the call moves only the cursor position.
+    if unsafe { SetCursorPos(x.round() as i32, y.round() as i32) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("move cursor to ring slot");
     }
     Ok(())
 }

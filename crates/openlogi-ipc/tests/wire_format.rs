@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 32);
 }
 
 #[test]
@@ -186,6 +186,13 @@ fn request_variant_order() {
         "142a01",
     );
     assert_wire(&AgentRequest::ActionRingCancel { session_id: 42 }, "152a");
+    assert_wire(
+        &AgentRequest::ActionRingInputRegion {
+            session_id: 42,
+            region: None,
+        },
+        "1c2a00",
+    );
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
     assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
@@ -244,7 +251,17 @@ fn agent_identity_is_two_plain_integers() {
 #[test]
 fn action_ring_types() {
     assert_wire(
+        &openlogi_core::action_ring::InputRegion {
+            x: 0.,
+            y: 0.,
+            width: 360.,
+            height: 360.,
+        },
+        "0000000000000000000000000000000000000000008076400000000000807640",
+    );
+    assert_wire(
         &ActionRingInvocation {
+            animation_speed: openlogi_core::binding::ActionRingAnimationSpeed::default(),
             session_id: 42,
             slots: BTreeMap::from([(
                 ActionRingSlot::Top,
@@ -256,7 +273,7 @@ fn action_ring_types() {
             )]),
             language: Some("fr".to_string()),
         },
-        "2a010003437574000701026672",
+        "2a01000343757400070102667250",
     );
     // The literal flag is one byte between label and icon.
     assert_wire(

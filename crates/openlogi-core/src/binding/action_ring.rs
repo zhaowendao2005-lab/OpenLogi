@@ -286,6 +286,83 @@ impl Default for ActionRingLayout {
     }
 }
 
+/// Playback speed as a percentage, shared by persistence and IPC.
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = 50, less_or_equal = 200),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        TryFrom,
+        Into,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct ActionRingAnimationSpeed(u16);
+
+impl ActionRingAnimationSpeed {
+    /// Slowest playback.
+    pub const MIN: Self = match Self::try_new(50) {
+        Ok(v) => v,
+        Err(_) => panic!("valid speed"),
+    };
+    /// Fastest playback.
+    pub const MAX: Self = match Self::try_new(200) {
+        Ok(v) => v,
+        Err(_) => panic!("valid speed"),
+    };
+    /// Slider step in percentage points.
+    pub const STEP: f32 = 10.0;
+    /// Relative playback rate.
+    #[must_use]
+    pub fn multiplier(self) -> f32 {
+        f32::from(self.into_inner()) / 100.0
+    }
+    /// Scale presentation time without affecting input feedback.
+    #[must_use]
+    pub fn duration(self, base: std::time::Duration) -> std::time::Duration {
+        base.div_f32(self.multiplier())
+    }
+    /// Round and clamp a UI value into the supported range.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "finite value clamped to validated u16 range"
+    )]
+    pub fn from_rounded(raw: f32) -> Self {
+        let raw = if raw.is_nan() {
+            f32::from(Self::default())
+        } else {
+            raw
+        };
+        let raw = raw
+            .clamp(f32::from(Self::MIN), f32::from(Self::MAX))
+            .round() as u16;
+        match Self::try_new(raw) {
+            Ok(v) => v,
+            Err(_) => unreachable!("clamped speed"),
+        }
+    }
+}
+impl Default for ActionRingAnimationSpeed {
+    fn default() -> Self {
+        match Self::try_new(80) {
+            Ok(v) => v,
+            Err(_) => unreachable!("valid default speed"),
+        }
+    }
+}
+impl From<ActionRingAnimationSpeed> for f32 {
+    fn from(value: ActionRingAnimationSpeed) -> Self {
+        Self::from(value.into_inner())
+    }
+}
+
 /// Per-device Actions Ring settings and application-specific layouts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -302,11 +379,15 @@ pub struct ActionRingConfig {
     /// Complete layout overrides keyed by foreground application identifier.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app: BTreeMap<String, ActionRingLayout>,
+    /// Device-wide opening and closing speed.
+    #[serde(default)]
+    pub animation_speed: ActionRingAnimationSpeed,
 }
 
 impl Default for ActionRingConfig {
     fn default() -> Self {
         Self {
+            animation_speed: ActionRingAnimationSpeed::default(),
             enabled: true,
             haptics: true,
             default: ActionRingLayout::default(),
@@ -340,6 +421,25 @@ const fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animation_speed_reads_legacy_config_and_rejects_invalid_values() {
+        let legacy: ActionRingConfig = toml::from_str("enabled = true").unwrap();
+        assert_eq!(legacy.animation_speed, ActionRingAnimationSpeed::default());
+        for raw in [0, 49, 201, 65535] {
+            ActionRingAnimationSpeed::try_new(raw).unwrap_err();
+            toml::from_str::<ActionRingConfig>(&format!("animation_speed = {raw}")).unwrap_err();
+        }
+        for raw in [50, 80, 100, 200] {
+            let config: ActionRingConfig =
+                toml::from_str(&format!("animation_speed = {raw}")).unwrap();
+            assert_eq!(config.animation_speed.into_inner(), raw);
+            assert_eq!(
+                toml::from_str::<ActionRingConfig>(&toml::to_string(&config).unwrap()).unwrap(),
+                config
+            );
+        }
+    }
 
     #[test]
     fn default_layout_populates_every_position() {

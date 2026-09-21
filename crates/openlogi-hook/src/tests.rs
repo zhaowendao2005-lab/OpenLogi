@@ -24,6 +24,7 @@ fn hook_error_display() {
 fn mouse_event_clone_and_debug() {
     let events = [
         MouseEvent::Button {
+            position: None,
             id: ButtonId::Back,
             pressed: true,
             device: None,

@@ -61,6 +61,19 @@ impl Config {
             .enabled = enabled;
     }
 
+    /// Set animation speed for one device.
+    pub fn set_action_ring_animation_speed(
+        &mut self,
+        device_key: &str,
+        speed: crate::binding::ActionRingAnimationSpeed,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .animation_speed = speed;
+    }
+
     /// Enable or disable ring hover and activation haptics.
     pub fn set_action_ring_haptics(&mut self, device_key: &str, enabled: bool) {
         self.devices

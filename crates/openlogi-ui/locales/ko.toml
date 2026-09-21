@@ -516,6 +516,10 @@ auto_on_with_camera = "카메라 사용 시 자동 켜기"
 camera_light_auto_description = "카메라를 하나라도 사용 중이면 조명을 켜고 모든 카메라가 비활성 상태이면 끕니다."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "액션 링"
 action_ring_description = "포인터 주위에 표시할 8개의 동작을 설정합니다."
 open_at_the_current_cursor_position = "현재 포인터 위치에서 엽니다."

@@ -370,6 +370,7 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
             // Device is already Logitech-only (see `is_hookable_mouse`); the
             // agent runtime treats `device: None` as remappable on Linux.
             Some(MouseEvent::Button {
+                position: None,
                 id,
                 pressed: value != 0,
                 device: None,
@@ -575,6 +576,7 @@ mod tests {
         assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Button {
+                position: None,
                 id: ButtonId::LeftClick,
                 pressed: true,
                 device: None,
@@ -588,6 +590,7 @@ mod tests {
         assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Button {
+                position: None,
                 id: ButtonId::LeftClick,
                 pressed: false,
                 device: None,
@@ -601,6 +604,7 @@ mod tests {
         assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Button {
+                position: None,
                 id: ButtonId::Back,
                 pressed: true,
                 device: None,
@@ -614,6 +618,7 @@ mod tests {
         assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Button {
+                position: None,
                 id: ButtonId::Back,
                 pressed: true,
                 device: None,
@@ -627,6 +632,7 @@ mod tests {
         assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Button {
+                position: None,
                 id: ButtonId::Forward,
                 pressed: true,
                 device: None,

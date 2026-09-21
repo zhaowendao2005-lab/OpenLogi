@@ -516,6 +516,10 @@ auto_on_with_camera = "Allumage automatique avec la caméra"
 camera_light_auto_description = "Allume l’éclairage lorsqu’une caméra est utilisée et l’éteint lorsqu’aucune ne l’est."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "Anneau d’actions"
 action_ring_description = "Configurez les huit actions affichées autour du pointeur."
 open_at_the_current_cursor_position = "Ouvrir à la position actuelle du pointeur."

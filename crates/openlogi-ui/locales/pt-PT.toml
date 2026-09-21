@@ -516,6 +516,10 @@ auto_on_with_camera = "Acender com a câmara"
 camera_light_auto_description = "Acenda a luz enquanto uma câmara estiver em uso e apague-a quando nenhuma estiver ativa."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "Anel de ações"
 action_ring_description = "Configure as oito ações apresentadas à volta do ponteiro."
 open_at_the_current_cursor_position = "Abrir na posição atual do ponteiro."

@@ -1,9 +1,12 @@
 //! One coordinate system for the painted wedges and their pointer targets.
 
-use gpui::{Bounds, PathBuilder, Pixels, Point, point, px};
+use std::fmt::Write as _;
+
+use gpui::{Bounds, Pixels, Point, point, px};
 use openlogi_core::binding::ActionRingSlot;
 
 pub(super) const DESIGN_SIZE: f32 = 520.0;
+pub(super) const CANCEL_SIZE: f32 = 48.0;
 const INNER_RADIUS: f32 = 88.0;
 const OUTER_RADIUS: f32 = 205.0;
 const CONTENT_RADIUS: f32 = 145.0;
@@ -55,6 +58,13 @@ impl Geometry {
         self.point(CONTENT_RADIUS, slot_angle(slot), pose)
     }
 
+    /// The stable ring annulus excludes the central cancel target and outside.
+    pub fn in_ring(self, position: Point<Pixels>) -> bool {
+        let offset = position - self.center;
+        let radius = f32::from(offset.x).hypot(f32::from(offset.y));
+        radius >= CANCEL_SIZE / 2.0 && radius <= OUTER_RADIUS * self.scale
+    }
+
     pub fn contains(self, position: Point<Pixels>, slot: ActionRingSlot, pose: Pose) -> bool {
         if pose.opacity <= 0.01 || pose.scale <= 0.0 || self.scale <= 0.0 {
             return false;
@@ -68,9 +78,35 @@ impl Geometry {
             && shortest_turn(slot_angle(slot), angle).abs() <= HALF_SECTOR
     }
 
+    /// Only rasterize occupied pixels. Padding preserves the stroke and its AA
+    /// fringe; outward DPI alignment keeps the cropped mask on the same grid.
+    pub fn wedge_viewport(self, slot: ActionRingSlot, grid: PixelGrid) -> Bounds<Pixels> {
+        let angle = slot_angle(slot);
+        let points = [INNER_RADIUS, OUTER_RADIUS].into_iter().flat_map(|radius| {
+            [-HALF_SECTOR, 0.0, HALF_SECTOR]
+                .map(|offset| self.point(radius, angle + offset, Pose::REST))
+        });
+        grid.enclose(points)
+    }
+
+    pub fn pointer_viewport(self, grid: PixelGrid) -> Bounds<Pixels> {
+        grid.enclose(
+            [
+                self.point(231.0, -1.5, Pose::REST),
+                self.point(231.0, 1.5, Pose::REST),
+                self.point(209.0, 0.0, Pose::REST),
+            ]
+            .into_iter(),
+        )
+    }
     /// Serialize the same radii and angular boundaries used by hit testing.
     /// Animation transforms this rest-pose mask rather than rebuilding its SVG.
-    pub fn wedge_svg(self, slot: ActionRingSlot, border_width: Option<Pixels>) -> String {
+    pub fn wedge_svg(
+        self,
+        slot: ActionRingSlot,
+        border_width: Option<Pixels>,
+        viewport: Bounds<Pixels>,
+    ) -> String {
         let start = slot_angle(slot) - HALF_SECTOR;
         let end = slot_angle(slot) + HALF_SECTOR;
         let a = self.point(OUTER_RADIUS, start, Pose::REST);
@@ -79,7 +115,6 @@ impl Geometry {
         let d = self.point(INNER_RADIUS, start, Pose::REST);
         let outer = f32::from(self.length(OUTER_RADIUS));
         let inner = f32::from(self.length(INNER_RADIUS));
-        let size = f32::from(self.length(DESIGN_SIZE));
         let style = border_width.map_or_else(
             || "fill=\"white\"".to_owned(),
             |width| {
@@ -89,36 +124,154 @@ impl Geometry {
                 )
             },
         );
-        format!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 {size} {size}"><path {style} d="M {} {} A {outer} {outer} 0 0 1 {} {} L {} {} A {inner} {inner} 0 0 0 {} {} Z"/></svg>"#,
-            f32::from(a.x),
-            f32::from(a.y),
-            f32::from(b.x),
-            f32::from(b.y),
-            f32::from(c.x),
-            f32::from(c.y),
-            f32::from(d.x),
-            f32::from(d.y),
+        svg_document(
+            viewport,
+            &format!(
+                r#"<path {style} d="M {} {} A {outer} {outer} 0 0 1 {} {} L {} {} A {inner} {inner} 0 0 0 {} {} Z"/>"#,
+                f32::from(a.x),
+                f32::from(a.y),
+                f32::from(b.x),
+                f32::from(b.y),
+                f32::from(c.x),
+                f32::from(c.y),
+                f32::from(d.x),
+                f32::from(d.y),
+            ),
         )
     }
 
-    pub fn circle(self, radius: f32, path: &mut PathBuilder) {
-        path.move_to(self.point(radius, 0.0, Pose::REST));
-        self.arc(path, radius, 180.0, Pose::REST, true);
-        self.arc(path, radius, 360.0, Pose::REST, true);
-        path.close();
+    /// A single cached layer; opacity groups retain the reference's hierarchy.
+    pub fn guides_svg(self, grid: PixelGrid) -> String {
+        let mut body = String::new();
+        let cx = f32::from(self.center.x);
+        let cy = f32::from(self.center.y);
+        let width = f32::from(grid.stroke_width(self.length(0.65)));
+        body.push_str(r#"<g fill="none" stroke="white" stroke-opacity="0.6">"#);
+        for (radius, dashed) in [(235.0, false), (216.0, true), (78.0, false)] {
+            let radius = f32::from(self.length(radius));
+            let dash = if dashed {
+                format!(
+                    r#" stroke-dasharray="{} {}""#,
+                    f32::from(self.length(2.0)),
+                    f32::from(self.length(5.0))
+                )
+            } else {
+                String::new()
+            };
+            // SVG circles start at three o'clock; the reference starts at twelve.
+            let _ = write!(
+                body,
+                r#"<circle cx="{cx}" cy="{cy}" r="{radius}" stroke-width="{width}"{dash} transform="rotate(-90 {cx} {cy})"/>"#
+            );
+        }
+        body.push_str("</g>");
+        let width = grid.stroke_width(self.length(1.0));
+        let _ = write!(
+            body,
+            r#"<g fill="none" stroke="white" stroke-width="{}" stroke-opacity="0.85">"#,
+            f32::from(width)
+        );
+        for i in 0_u16..80 {
+            let major = i % 10 == 0;
+            let angle = f32::from(i) * 4.5;
+            let (start, end) = grid.line(
+                self.point(if major { 239.0 } else { 240.0 }, angle, Pose::REST),
+                self.point(if major { 248.0 } else { 244.0 }, angle, Pose::REST),
+                width,
+            );
+            svg_line(&mut body, start, end);
+        }
+        body.push_str("</g>");
+        let width = f32::from(grid.stroke_width(self.length(0.7)));
+        let _ = write!(
+            body,
+            r#"<g fill="none" stroke="white" stroke-width="{width}" stroke-opacity="0.45">"#
+        );
+        for slot in ActionRingSlot::ALL {
+            let angle = slot_angle(slot) + 22.5;
+            svg_line(
+                &mut body,
+                self.point(80.0, angle, Pose::REST),
+                self.point(230.0, angle, Pose::REST),
+            );
+        }
+        body.push_str("</g>");
+        svg_document(square(f32::from(self.length(DESIGN_SIZE))), &body)
     }
 
-    fn arc(self, path: &mut PathBuilder, radius: f32, end: f32, pose: Pose, clockwise: bool) {
-        let radius_px = self.length(radius * pose.scale);
-        path.arc_to(
-            point(radius_px, radius_px),
-            px(0.0),
-            false,
-            clockwise,
-            self.point(radius, end, pose),
+    /// Rotate the completed masks, never snap a moving endpoint; that would
+    /// introduce a discontinuity at cardinal angles.
+    pub fn pointer_svgs(self, grid: PixelGrid, viewport: Bounds<Pixels>) -> [String; 2] {
+        let a = self.point(231.0, -1.5, Pose::REST);
+        let b = self.point(231.0, 1.5, Pose::REST);
+        let tip = self.point(223.0, 0.0, Pose::REST);
+        let triangle = svg_document(
+            viewport,
+            &format!(
+                r#"<path fill="white" d="M {} {} L {} {} L {} {} Z"/>"#,
+                f32::from(a.x),
+                f32::from(a.y),
+                f32::from(b.x),
+                f32::from(b.y),
+                f32::from(tip.x),
+                f32::from(tip.y),
+            ),
         );
+        let width = f32::from(grid.stroke_width(self.length(1.0)));
+        let mut stem = format!(r#"<g fill="none" stroke="white" stroke-width="{width}">"#);
+        svg_line(
+            &mut stem,
+            self.point(217.0, 0.0, Pose::REST),
+            self.point(209.0, 0.0, Pose::REST),
+        );
+        stem.push_str("</g>");
+        [triangle, svg_document(viewport, &stem)]
     }
+}
+
+/// The circle fills the existing target, with its border drawn inside it.
+pub(super) fn cancel_svgs() -> [String; 2] {
+    let center = CANCEL_SIZE / 2.0;
+    [
+        svg_document(
+            square(CANCEL_SIZE),
+            &format!(r#"<circle cx="{center}" cy="{center}" r="{center}" fill="white"/>"#),
+        ),
+        svg_document(
+            square(CANCEL_SIZE),
+            &format!(
+                r#"<circle cx="{center}" cy="{center}" r="{}" fill="none" stroke="white" stroke-width="1"/>"#,
+                center - 0.5
+            ),
+        ),
+    ]
+}
+
+pub(super) fn square(size: f32) -> Bounds<Pixels> {
+    Bounds::new(Point::default(), gpui::size(px(size), px(size)))
+}
+
+fn svg_document(bounds: Bounds<Pixels>, body: &str) -> String {
+    let (x, y, width, height) = (
+        f32::from(bounds.origin.x),
+        f32::from(bounds.origin.y),
+        f32::from(bounds.size.width),
+        f32::from(bounds.size.height),
+    );
+    format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="{x} {y} {width} {height}">{body}</svg>"#
+    )
+}
+fn svg_line(body: &mut String, start: Point<Pixels>, end: Point<Pixels>) {
+    // Writing to String is infallible. Generate strings only on cache creation.
+    let _ = write!(
+        body,
+        r#"<path d="M {} {} L {} {}"/>"#,
+        f32::from(start.x),
+        f32::from(start.y),
+        f32::from(end.x),
+        f32::from(end.y)
+    );
 }
 
 pub(super) fn slot_angle(slot: ActionRingSlot) -> f32 {
@@ -143,6 +296,22 @@ impl PixelGrid {
         Self { scale_factor }
     }
 
+    fn enclose(self, points: impl Iterator<Item = Point<Pixels>> + Clone) -> Bounds<Pixels> {
+        let minimum = points
+            .clone()
+            .fold(point(px(f32::INFINITY), px(f32::INFINITY)), |a, b| {
+                point(a.x.min(b.x), a.y.min(b.y))
+            });
+        let maximum = points.fold(
+            point(px(f32::NEG_INFINITY), px(f32::NEG_INFINITY)),
+            |a, b| point(a.x.max(b.x), a.y.max(b.y)),
+        );
+        let origin = minimum
+            .map(|p| px(((f32::from(p) * self.scale_factor).floor() - 2.0) / self.scale_factor));
+        let end = maximum
+            .map(|p| px(((f32::from(p) * self.scale_factor).ceil() + 2.0) / self.scale_factor));
+        Bounds::new(origin, gpui::size(end.x - origin.x, end.y - origin.y))
+    }
     pub fn stroke_width(self, logical: Pixels) -> Pixels {
         px((f32::from(logical) * self.scale_factor).round().max(1.0) / self.scale_factor)
     }

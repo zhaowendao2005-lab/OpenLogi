@@ -39,6 +39,7 @@ fn main() -> Result<()> {
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
     let ipc::Handle {
+        regions,
         mut invocations,
         commands,
     } = ipc::spawn();
@@ -57,58 +58,56 @@ fn main() -> Result<()> {
                 let Some(invocation) = observed else {
                     cx.update(|cx| {
                         for handle in cx.windows() {
-                            let _ = handle.update(cx, |_, window, _| window.remove_window());
+                            if let Some(handle) = handle.downcast::<RingView>() {
+                                let _ = handle.update(cx, RingView::dismiss);
+                            }
                         }
                     });
                     continue;
                 };
                 openlogi_core::locale::activate(invocation.language.as_deref());
-                cx.update(|cx| {
+                let session_id = invocation.session_id;
+                let started = std::time::Instant::now();
+                let created = cx.update(|cx| -> Result<_> {
                     for handle in cx.windows() {
-                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                        let _ =
+                            handle.update(cx, |_, window, cx| platform::close_window(window, cx));
                     }
-                    let placement = match RingPlacement::capture(cx) {
-                        Ok(placement) => placement,
-                        Err(error) => {
-                            warn!(%error, "could not locate Actions Ring display");
-                            let _ = commands.send(OverlayCommand::Cancel {
-                                session_id: invocation.session_id,
-                            });
-                            return;
-                        }
-                    };
-                    let commands = commands.clone();
-                    let timeout_commands = commands.clone();
-                    let session_id = invocation.session_id;
-                    match cx.open_window(placement.window_options(), |_, cx| {
-                        cx.new(|_| RingView::new(invocation, commands, &live_session))
-                    }) {
-                        Ok(handle) => {
-                            if let Err(error) = handle
-                                .update(cx, |_, window, _| placement.show(window))
-                                .and_then(std::convert::identity)
-                            {
-                                warn!(%error, "could not position Actions Ring window");
-                                let _ = handle.update(cx, |_, window, _| window.remove_window());
-                                let _ =
-                                    timeout_commands.send(OverlayCommand::Cancel { session_id });
-                                return;
-                            }
-                            cx.spawn(async move |cx| {
-                                cx.background_executor().timer(DISPLAY_LIFETIME).await;
-                                if handle
-                                    .update(cx, |_, window, _| window.remove_window())
-                                    .is_ok()
-                                {
-                                    let _ = timeout_commands
-                                        .send(OverlayCommand::Cancel { session_id });
-                                }
-                            })
-                            .detach();
-                        }
-                        Err(error) => warn!(%error, "could not open Actions Ring window"),
-                    }
+                    let placement = RingPlacement::capture(cx)?;
+                    let handle = cx.open_window(placement.window_options(), |_, cx| {
+                        cx.new(|_| {
+                            RingView::new(invocation, commands.clone(), &live_session)
+                                .with_region_publisher(regions.clone())
+                        })
+                    })?;
+                    Ok((placement, handle))
                 });
+                let (placement, handle) = match created {
+                    Ok(created) => created,
+                    Err(error) => {
+                        warn!(%error, "could not open Actions Ring window");
+                        let _ = commands.send(OverlayCommand::Cancel { session_id });
+                        continue;
+                    }
+                };
+                // Native positioning must run after App/Window's mutable borrows
+                // have ended: Win32 synchronously reenters their event callbacks.
+                if let Err(error) = placement.show(handle, cx) {
+                    warn!(%error, "could not position Actions Ring window");
+                    let _ = handle.update(cx, |_, window, cx| platform::close_window(window, cx));
+                    let _ = commands.send(OverlayCommand::Cancel { session_id });
+                    continue;
+                }
+                tracing::debug!(
+                    session_id,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "Actions Ring window ready"
+                );
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(DISPLAY_LIFETIME).await;
+                    let _ = handle.update(cx, RingView::cancel);
+                })
+                .detach();
             }
         })
         .detach();

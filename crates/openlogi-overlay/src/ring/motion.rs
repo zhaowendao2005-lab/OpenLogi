@@ -6,6 +6,8 @@ use openlogi_core::binding::ActionRingSlot;
 
 use super::geometry::{Pose, shortest_turn, slot_angle};
 
+const CLOSE_DURATION: Duration = Duration::from_millis(150);
+
 #[derive(Clone, Copy)]
 struct Tween {
     from: f32,
@@ -57,12 +59,16 @@ pub(super) struct Frame {
     pub sectors: [SectorFrame; 8],
     pub pointer_angle: f32,
     pub pointer_opacity: f32,
-    pub guides_opacity: f32,
+    pub guides: Pose,
+    pub core_opacity: f32,
+    pub closed: bool,
     pub active: bool,
 }
 
 pub(super) struct Motion {
+    speed: openlogi_core::binding::ActionRingAnimationSpeed,
     opened: Instant,
+    closing: Option<(Instant, Frame)>,
     highlight: [Tween; 8],
     content: [Tween; 8],
     pointer: Tween,
@@ -70,9 +76,11 @@ pub(super) struct Motion {
 }
 
 impl Motion {
-    pub fn new(now: Instant) -> Self {
+    pub fn new(now: Instant, speed: openlogi_core::binding::ActionRingAnimationSpeed) -> Self {
         Self {
+            speed,
             opened: now,
+            closing: None,
             highlight: [Tween::new(0.0, now, 110); 8],
             content: [Tween::new(0.0, now, 180); 8],
             pointer: Tween::new(0.0, now, 160),
@@ -80,7 +88,28 @@ impl Motion {
         }
     }
 
+    pub fn before_show(&self, reduce_motion: bool) -> Frame {
+        self.frame(self.opened, reduce_motion)
+    }
+
+    pub fn is_closing(&self) -> bool {
+        self.closing.is_some()
+    }
+
+    pub fn close(&mut self, now: Instant, reduce_motion: bool) -> Duration {
+        if self.closing.is_none() {
+            self.closing = Some((now, self.frame(now, reduce_motion)));
+        }
+        if reduce_motion {
+            Duration::ZERO
+        } else {
+            self.speed.duration(CLOSE_DURATION)
+        }
+    }
     pub fn select(&mut self, selected: Option<ActionRingSlot>, now: Instant) {
+        if self.is_closing() {
+            return;
+        }
         for slot in ActionRingSlot::ALL {
             let target = if selected == Some(slot) { 1.0 } else { 0.0 };
             self.highlight[slot.index()].retarget(target, now);
@@ -96,7 +125,36 @@ impl Motion {
     }
 
     pub fn frame(&self, now: Instant, reduce_motion: bool) -> Frame {
-        let elapsed = now.saturating_duration_since(self.opened);
+        if let Some((started, snapshot)) = self.closing {
+            let elapsed = now.saturating_duration_since(started);
+            let amount = if reduce_motion {
+                1.0
+            } else {
+                progress(elapsed, self.speed.duration(CLOSE_DURATION))
+            };
+            let fold = amount * amount * (3.0 - 2.0 * amount);
+            let retract = |pose: Pose| Pose {
+                scale: pose.scale * (1.0 - 0.66 * fold),
+                rotation: pose.rotation - 62.0 * fold,
+                opacity: pose.opacity * (1.0 - fold),
+            };
+            return Frame {
+                sectors: snapshot.sectors.map(|sector| SectorFrame {
+                    pose: retract(sector.pose),
+                    ..sector
+                }),
+                guides: retract(snapshot.guides),
+                core_opacity: snapshot.core_opacity
+                    * (1.0 - ((amount - 0.6) / 0.4).clamp(0.0, 1.0)),
+                pointer_opacity: snapshot.pointer_opacity * (1.0 - fold),
+                pointer_angle: snapshot.pointer_angle - 62.0 * fold,
+                active: amount < 1.0,
+                closed: amount >= 1.0,
+            };
+        }
+        let elapsed = now
+            .saturating_duration_since(self.opened)
+            .mul_f32(self.speed.multiplier());
         let value = |tween: Tween| {
             if reduce_motion {
                 tween.to
@@ -108,33 +166,43 @@ impl Motion {
             let deploy = if reduce_motion {
                 1.0
             } else {
-                let delay = Duration::from_secs_f32(slot_angle(slot) / 45.0 * 0.022);
+                let delay = Duration::from_secs_f32(0.045 + slot_angle(slot) / 45.0 * 0.008);
                 ease(progress(
                     elapsed.saturating_sub(delay),
-                    Duration::from_millis(410),
+                    Duration::from_millis(180),
                 ))
             };
             SectorFrame {
                 pose: Pose {
-                    scale: 0.67 + 0.33 * deploy,
-                    rotation: -9.0 * (1.0 - deploy),
+                    scale: 0.34 + 0.66 * deploy,
+                    rotation: -62.0 * (1.0 - deploy),
                     opacity: deploy,
                 },
                 highlight: value(self.highlight[slot.index()]),
                 content_scale: 1.0 + 0.055 * value(self.content[slot.index()]),
             }
         });
+        let deploy = if reduce_motion {
+            1.0
+        } else {
+            ease(progress(
+                elapsed.saturating_sub(Duration::from_millis(45)),
+                Duration::from_millis(180),
+            ))
+        };
         Frame {
             sectors,
             pointer_angle: value(self.pointer),
-            pointer_opacity: value(self.visibility),
-            guides_opacity: if reduce_motion {
-                1.0
-            } else {
-                ease(progress(elapsed, Duration::from_millis(650)))
+            pointer_opacity: value(self.visibility) * deploy,
+            guides: Pose {
+                scale: 0.34 + 0.66 * deploy,
+                rotation: -62.0 * (1.0 - deploy),
+                opacity: deploy,
             },
+            core_opacity: 1.0,
+            closed: false,
             active: !reduce_motion
-                && (elapsed < Duration::from_millis(650)
+                && (elapsed < Duration::from_millis(281)
                     || self
                         .highlight
                         .iter()
@@ -175,7 +243,10 @@ mod tests {
     #[test]
     fn deployment_is_staggered_and_eventually_stops() {
         let now = Instant::now();
-        let motion = Motion::new(now);
+        let motion = Motion::new(
+            now,
+            openlogi_core::binding::ActionRingAnimationSpeed::try_new(100).unwrap(),
+        );
         let early = motion.frame(now + Duration::from_millis(80), false);
         assert!(early.sectors[0].pose.opacity > early.sectors[3].pose.opacity);
         assert!(early.sectors[7].pose.opacity.abs() < f32::EPSILON);
@@ -192,7 +263,10 @@ mod tests {
     #[test]
     fn pointer_takes_shortest_turn_and_retargets_without_jumping() {
         let now = Instant::now();
-        let mut motion = Motion::new(now);
+        let mut motion = Motion::new(
+            now,
+            openlogi_core::binding::ActionRingAnimationSpeed::try_new(100).unwrap(),
+        );
         motion.select(Some(ActionRingSlot::TopLeft), now);
         let later = now + Duration::from_millis(40);
         let angle = motion.frame(later, false).pointer_angle;
@@ -212,7 +286,10 @@ mod tests {
     #[test]
     fn reduced_motion_is_static_and_selection_remains_visible() {
         let now = Instant::now();
-        let mut motion = Motion::new(now);
+        let mut motion = Motion::new(
+            now,
+            openlogi_core::binding::ActionRingAnimationSpeed::try_new(100).unwrap(),
+        );
         motion.select(Some(ActionRingSlot::Right), now);
         let frame = motion.frame(now, true);
         assert!(!frame.active);
@@ -226,5 +303,96 @@ mod tests {
         );
         motion.select(None, now);
         assert!(motion.frame(now, true).pointer_opacity.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn core_precedes_the_spin_and_exit_reverses_without_a_jump() {
+        let now = Instant::now();
+        let mut motion = Motion::new(
+            now,
+            openlogi_core::binding::ActionRingAnimationSpeed::try_new(100).unwrap(),
+        );
+        let first = motion.before_show(false);
+        assert!((first.core_opacity - 1.0).abs() < f32::EPSILON);
+        assert!(
+            first
+                .sectors
+                .iter()
+                .all(|sector| sector.pose.opacity.abs() < f32::EPSILON)
+        );
+        assert!(
+            motion
+                .frame(now + Duration::from_millis(40), false)
+                .guides
+                .opacity
+                .abs()
+                < f32::EPSILON
+        );
+        let ready = now + Duration::from_millis(300);
+        let before = motion.frame(ready, false);
+        assert!(!before.active);
+        let duration = motion.close(ready, false);
+        let initial = motion.frame(ready, false);
+        assert!((initial.sectors[0].pose.rotation - before.sectors[0].pose.rotation).abs() < 0.001);
+        assert!((initial.sectors[0].pose.scale - before.sectors[0].pose.scale).abs() < 0.001);
+        let middle = motion.frame(ready + duration / 2, false);
+        assert!(middle.sectors[0].pose.rotation < before.sectors[0].pose.rotation);
+        assert!(middle.sectors[0].pose.scale < before.sectors[0].pose.scale);
+        assert!((middle.core_opacity - 1.0).abs() < f32::EPSILON);
+        motion.close(ready + duration / 2, false);
+        let closed = motion.frame(ready + duration, false);
+        assert!(closed.closed && !closed.active);
+        assert!(closed.core_opacity.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn interrupted_entry_and_reduced_motion_exit_are_bounded() {
+        let now = Instant::now();
+        for delay in [0, 30, 90, 200] {
+            let mut motion = Motion::new(
+                now,
+                openlogi_core::binding::ActionRingAnimationSpeed::try_new(100).unwrap(),
+            );
+            let at = now + Duration::from_millis(delay);
+            let before = motion.frame(at, false);
+            let duration = motion.close(at, false);
+            let after = motion.frame(at, false);
+            assert!((after.sectors[0].pose.opacity - before.sectors[0].pose.opacity).abs() < 0.001);
+            assert!(motion.frame(at + duration, false).closed);
+        }
+        let mut motion = Motion::new(
+            now,
+            openlogi_core::binding::ActionRingAnimationSpeed::try_new(100).unwrap(),
+        );
+        assert_eq!(motion.close(now, true), Duration::ZERO);
+        assert!(motion.frame(now, true).closed);
+    }
+    #[test]
+    fn playback_speed_scales_entry_and_exit_but_not_hover_feedback() {
+        use openlogi_core::binding::ActionRingAnimationSpeed;
+        let now = Instant::now();
+        for percent in [50, 80, 100, 200] {
+            let speed = ActionRingAnimationSpeed::try_new(percent).unwrap();
+            let mut motion = Motion::new(now, speed);
+            let entering = now + speed.duration(Duration::from_millis(100));
+            assert!(motion.frame(entering, false).active);
+            let ready = now + speed.duration(Duration::from_millis(300));
+            assert!(!motion.frame(ready, false).active);
+            motion.select(Some(ActionRingSlot::Top), ready);
+            assert!(
+                (motion
+                    .frame(ready + Duration::from_millis(120), false)
+                    .sectors[0]
+                    .highlight
+                    - 1.0)
+                    .abs()
+                    < 0.001
+            );
+            let at = ready + Duration::from_secs(1);
+            let duration = motion.close(at, false);
+            assert_eq!(duration, speed.duration(CLOSE_DURATION));
+            assert!(!motion.frame(at + duration / 2, false).closed);
+            assert!(motion.frame(at + duration, false).closed);
+        }
     }
 }

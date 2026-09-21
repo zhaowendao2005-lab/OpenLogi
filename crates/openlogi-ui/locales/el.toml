@@ -516,6 +516,10 @@ auto_on_with_camera = "Αυτόματη ενεργοποίηση με την κ�
 camera_light_auto_description = "Ανάβει το φως όταν χρησιμοποιείται κάποια κάμερα και το σβήνει όταν καμία δεν είναι ενεργή."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "Δακτύλιος ενεργειών"
 action_ring_description = "Ρυθμίστε τις οκτώ ενέργειες που εμφανίζονται γύρω από τον δείκτη."
 open_at_the_current_cursor_position = "Άνοιγμα στην τρέχουσα θέση του δείκτη."

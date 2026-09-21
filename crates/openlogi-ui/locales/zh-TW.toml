@@ -516,6 +516,10 @@ auto_on_with_camera = "隨攝影機自動開啟"
 camera_light_auto_description = "任何攝影機使用時開燈，所有攝影機均未使用時關燈。"
 
 [action_ring]
+animation_speed = "動畫速度"
+animation_speed_description = "控制出現和退出動畫，下次喚出時生效。"
+animation_slow = "慢"
+animation_fast = "快"
 actions_ring = "動作環"
 action_ring_description = "設定顯示在指標周圍的八個動作。"
 open_at_the_current_cursor_position = "在指標目前位置開啟。"

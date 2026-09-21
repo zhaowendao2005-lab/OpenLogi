@@ -462,6 +462,7 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
         // `device` as None so remapping still works (see hook_runtime: non-macOS
         // keeps remapping when attribution is absent).
         return Some(MouseEvent::Button {
+            position: Some((f64::from(data.pt.x), f64::from(data.pt.y))),
             id,
             pressed,
             device: None,

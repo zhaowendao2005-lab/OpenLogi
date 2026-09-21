@@ -516,6 +516,10 @@ auto_on_with_camera = "Tänd automatiskt med kameran"
 camera_light_auto_description = "Tänd lampan när en kamera används och släck den när ingen kamera är aktiv."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "Åtgärdsring"
 action_ring_description = "Konfigurera de åtta åtgärderna som visas runt pekaren."
 open_at_the_current_cursor_position = "Öppna vid pekarens aktuella position."

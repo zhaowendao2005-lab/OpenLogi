@@ -153,3 +153,213 @@ pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
 pub fn display_containing(_x: f64, _y: f64) -> Option<CursorDisplay> {
     None
 }
+
+/// The departing ring is decoration only; let clicks reach the application below.
+#[cfg(target_os = "windows")]
+pub(crate) fn release_pointer(window: &gpui::Window) {
+    if let Err(error) = windows::release_pointer(window) {
+        tracing::warn!(?error, "could not release Actions Ring pointer input");
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn release_pointer(_window: &gpui::Window) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    if let Some(marker) = MainThreadMarker::new() {
+        for window in NSApplication::sharedApplication(marker).windows() {
+            window.setIgnoresMouseEvents(true);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub(crate) fn release_pointer(window: &gpui::Window) {
+    window.set_input_region(Some(&[]));
+}
+
+/// Hide before destruction so native hover/activation notifications can run
+/// while GPUI still owns the window. Never call native visibility APIs while
+/// an App or Window update is on the stack.
+pub(crate) fn close_window(window: &mut gpui::Window, cx: &mut gpui::App) {
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        #[cfg(target_os = "windows")]
+        let _ = windows::hide(handle, cx);
+        cx.spawn(async move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        })
+        .detach();
+    })
+    .detach();
+}
+
+/// Undo the Windows system's lines-per-notch setting before discrete ring selection.
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "read-only system scroll setting with a writable u32 output"
+)]
+pub(crate) fn normalize_ring_scroll(delta: gpui::ScrollDelta) -> gpui::ScrollDelta {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SPI_GETWHEELSCROLLLINES, SystemParametersInfoW,
+    };
+    let gpui::ScrollDelta::Lines(mut lines) = delta else {
+        return delta;
+    };
+    let mut amount: u32 = 0;
+    // SAFETY: the API writes exactly one u32 for SPI_GETWHEELSCROLLLINES.
+    if unsafe { SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, (&raw mut amount).cast(), 0) }
+        != 0
+        && amount > 0
+    {
+        // The GPUI backend multiplies native notch distance by this same value,
+        // including the Windows page-scroll sentinel.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "undo GPUI's identical u32-to-f32 wheel scaling"
+        )]
+        {
+            lines.y /= amount as f32;
+        }
+    } else {
+        lines.y = lines.y.signum();
+    }
+    gpui::ScrollDelta::Lines(lines)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) const fn normalize_ring_scroll(delta: gpui::ScrollDelta) -> gpui::ScrollDelta {
+    delta
+}
+
+/// Ownership of the hidden system cursor for one ring session.
+///
+/// Both platforms expose *counted* hide APIs (Win32 `ShowCursor`, CoreGraphics
+/// `CGDisplayHideCursor`), so an unbalanced hide leaves the user with no cursor
+/// at all. Restoration is therefore tied to this value's lifetime instead of to
+/// a caller remembering to undo it: a dropped session restores the cursor even
+/// on the early-return and panic paths.
+///
+/// GPUI has no element-level or window-level equivalent. `CursorStyle` has no
+/// hidden variant, and `Platform::hide_cursor_until_mouse_moves` is crate-private
+/// and keyboard-triggered, so the ring owns this natively.
+#[derive(Debug)]
+pub(crate) struct HiddenCursor(());
+
+impl HiddenCursor {
+    /// Hide the system cursor until the returned value is dropped.
+    pub(crate) fn acquire() -> Option<Self> {
+        hide_system_cursor().then_some(Self(()))
+    }
+}
+
+impl Drop for HiddenCursor {
+    fn drop(&mut self) {
+        show_system_cursor();
+    }
+}
+
+/// `ShowCursor` keeps an internal display counter rather than a boolean, and its
+/// starting value is not guaranteed, so drive it to the first negative value
+/// instead of decrementing once. The bound stops a pathological counter from
+/// spinning; a cursor we failed to hide is reported as not hidden, so no
+/// unbalanced restore is queued for it.
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "Win32 ShowCursor takes no pointer and returns the new display count"
+)]
+fn hide_system_cursor() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::ShowCursor;
+    for _ in 0..MAX_CURSOR_COUNTER_STEPS {
+        // SAFETY: no arguments to validate and no output buffer; the call only
+        // moves this thread's cursor display counter.
+        if unsafe { ShowCursor(0) } < 0 {
+            return true;
+        }
+    }
+    tracing::warn!("could not hide the cursor for the Actions Ring");
+    false
+}
+
+/// The exact inverse of [`hide_system_cursor`]: raise the counter back to the
+/// visible range without overshooting into another component's hide.
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "Win32 ShowCursor takes no pointer and returns the new display count"
+)]
+fn show_system_cursor() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::ShowCursor;
+    for _ in 0..MAX_CURSOR_COUNTER_STEPS {
+        // SAFETY: as above; this direction restores what `acquire` consumed.
+        if unsafe { ShowCursor(1) } >= 0 {
+            return;
+        }
+    }
+    tracing::warn!("could not restore the cursor after the Actions Ring");
+}
+
+/// Hide on the main display: the counted CoreGraphics call is process-wide for
+/// cursor visibility, and the ring is a single cursor-centred session.
+#[cfg(target_os = "macos")]
+fn hide_system_cursor() -> bool {
+    match core_graphics::display::CGDisplay::main().hide_cursor() {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(?error, "could not hide the cursor for the Actions Ring");
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn show_system_cursor() {
+    if let Err(error) = core_graphics::display::CGDisplay::main().show_cursor() {
+        tracing::warn!(
+            ?error,
+            "could not restore the cursor after the Actions Ring"
+        );
+    }
+}
+
+/// Linux has no equivalent that works for a click-through popup the compositor
+/// may not have given pointer focus; the ring keeps the system cursor there.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const fn hide_system_cursor() -> bool {
+    false
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const fn show_system_cursor() {}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const MAX_CURSOR_COUNTER_STEPS: u8 = 64;
+
+/// Move the system cursor to a global screen position.
+///
+/// The coordinate space is the one [`openlogi_core::action_ring::InputRegion`]
+/// is published in: physical screen pixels on Windows, global points on macOS.
+/// That region is the ring window's own rectangle, so it is the single origin
+/// both the hit testing and this warp are expressed against.
+#[cfg(target_os = "windows")]
+pub(crate) fn warp_cursor(x: f64, y: f64) {
+    if let Err(error) = windows::warp_cursor(x, y) {
+        tracing::warn!(?error, "could not move the cursor to the selected slot");
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn warp_cursor(x: f64, y: f64) {
+    use core_graphics::display::CGDisplay;
+    use core_graphics::geometry::CGPoint;
+    // Warping does not synthesize a move event, but AppKit still delivers the
+    // resulting position change; the view filters that echo by position.
+    if let Err(error) = CGDisplay::warp_mouse_cursor_position(CGPoint::new(x, y)) {
+        tracing::warn!(?error, "could not move the cursor to the selected slot");
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub(crate) const fn warp_cursor(_x: f64, _y: f64) {}

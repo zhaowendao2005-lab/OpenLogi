@@ -88,6 +88,7 @@ macro_rules! rounded_slider_unit {
 }
 
 rounded_slider_unit!(
+    openlogi_core::binding::ActionRingAnimationSpeed,
     Dpi,
     SmartShiftThreshold,
     ThumbwheelSensitivity,

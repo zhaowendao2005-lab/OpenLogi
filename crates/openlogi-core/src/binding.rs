@@ -26,8 +26,8 @@ mod tests;
 
 pub use action::{Action, WorkflowStep};
 pub use action_ring::{
-    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
-    RingAction, RingActionError,
+    ActionRingAnimationSpeed, ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout,
+    ActionRingSlot, RingAction, RingActionError,
 };
 pub use application_target::{ApplicationTarget, ApplicationTargetError};
 pub use button::ButtonId;

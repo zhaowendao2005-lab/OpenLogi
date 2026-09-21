@@ -782,6 +782,7 @@ impl Orchestrator {
         .then(|| device.route.clone())
         .flatten();
         Some(ActionRingSessionSpec {
+            animation_speed: ring.animation_speed,
             device_key: key.to_owned(),
             haptic_route,
             layout,

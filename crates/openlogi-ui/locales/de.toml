@@ -516,6 +516,10 @@ auto_on_with_camera = "Automatisch mit Kamera einschalten"
 camera_light_auto_description = "Beleuchtung einschalten, sobald eine Kamera verwendet wird, und ausschalten, wenn keine Kamera aktiv ist."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "Aktionsring"
 action_ring_description = "Konfiguriere die acht Aktionen, die um den Mauszeiger angezeigt werden."
 open_at_the_current_cursor_position = "An der aktuellen Zeigerposition öffnen."

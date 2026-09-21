@@ -175,3 +175,19 @@ fn empty_dpi_presets_skip_serialization() {
         "empty dpi_presets should be omitted: {body}"
     );
 }
+
+#[test]
+fn action_ring_speed_roundtrips_per_device_without_changing_layout() {
+    use crate::binding::ActionRingAnimationSpeed;
+    let mut config = Config::default();
+    let layout = config.action_ring("mouse-a").default;
+    let speed = ActionRingAnimationSpeed::try_new(150).unwrap();
+    config.set_action_ring_animation_speed("mouse-a", speed);
+    let restored = write_and_read(&config);
+    assert_eq!(restored.action_ring("mouse-a").animation_speed, speed);
+    assert_eq!(restored.action_ring("mouse-a").default, layout);
+    assert_eq!(
+        restored.action_ring("mouse-b").animation_speed,
+        ActionRingAnimationSpeed::default()
+    );
+}

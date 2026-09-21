@@ -516,6 +516,10 @@ auto_on_with_camera = "Auto-on with camera"
 camera_light_auto_description = "Turn the light on when any camera is in use and off when all cameras are inactive."
 
 [action_ring]
+animation_speed = "Animation speed"
+animation_speed_description = "Controls opening and closing animations. Applies the next time the ring opens."
+animation_slow = "Slow"
+animation_fast = "Fast"
 actions_ring = "Actions Ring"
 action_ring_description = "Configure the eight actions shown around the cursor."
 open_at_the_current_cursor_position = "Open at the current cursor position."

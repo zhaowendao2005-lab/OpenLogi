@@ -146,6 +146,25 @@ impl AppState {
         events
     }
 
+    /// Persist animation speed through the ordinary device configuration path.
+    pub fn commit_action_ring_animation_speed(
+        &mut self,
+        speed: openlogi_core::binding::ActionRingAnimationSpeed,
+    ) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return events;
+        };
+        self.config
+            .edit(|config| config.set_action_ring_animation_speed(&key, speed));
+        self.persist_and_reload("Actions Ring animation speed");
+        events
+    }
+
     /// Enable or disable hover and activation haptics for the active ring.
     pub fn commit_action_ring_haptics(&mut self, enabled: bool) -> StateEvents {
         let events = self.for_current_device(StateEvent::BindingsChanged);

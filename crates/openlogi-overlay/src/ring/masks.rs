@@ -7,48 +7,132 @@ use gpui::{
 use openlogi_core::binding::ActionRingSlot;
 
 use super::WINDOW_SIZE;
-use super::geometry::{Geometry, PixelGrid, Pose};
+use super::geometry::{Geometry, PixelGrid, Pose, cancel_svgs, square};
 
 struct Mask {
     key: SharedString,
     data: String,
+    viewport: Bounds<Pixels>,
 }
 
-pub(super) struct WedgeMasks {
+impl Mask {
+    fn paint(
+        &self,
+        bounds: Bounds<Pixels>,
+        transform: TransformationMatrix,
+        color: Hsla,
+        window: &mut Window,
+        cx: &App,
+    ) {
+        if let Err(error) = window.paint_svg(
+            Bounds::new(bounds.origin + self.viewport.origin, self.viewport.size),
+            self.key.clone(),
+            Some(self.data.as_bytes()),
+            transform,
+            color,
+            cx,
+        ) {
+            tracing::warn!(?error, "could not paint Actions Ring SVG mask");
+        }
+    }
+}
+pub(super) struct RingMasks {
     scale_factor: f32,
     slots: [[Mask; 2]; 8],
+    guides: Mask,
+    pointer: [Mask; 2],
+    cancel: [String; 2],
 }
 
-impl WedgeMasks {
+impl RingMasks {
     pub fn new(scale_factor: f32) -> Self {
         let geometry = Geometry::new(Bounds::new(
             Point::default(),
             size(px(WINDOW_SIZE), px(WINDOW_SIZE)),
         ));
-        let width = PixelGrid::new(scale_factor).stroke_width(geometry.length(0.8));
+        let grid = PixelGrid::new(scale_factor);
+        let width = grid.stroke_width(geometry.length(0.8));
         Self {
             scale_factor,
+            guides: Mask {
+                key: format!("__openlogi_ring_guides_{}", scale_factor.to_bits()).into(),
+                data: geometry.guides_svg(grid),
+                viewport: square(WINDOW_SIZE),
+            },
+            pointer: {
+                let viewport = geometry.pointer_viewport(grid);
+                let [tip, stem] = geometry.pointer_svgs(grid, viewport);
+                [("tip", tip), ("stem", stem)].map(|(part, data)| Mask {
+                    key: format!("__openlogi_ring_pointer_{part}_{}", scale_factor.to_bits())
+                        .into(),
+                    data,
+                    viewport,
+                })
+            },
+            cancel: cancel_svgs(),
             slots: ActionRingSlot::ALL.map(|slot| {
+                let viewport = geometry.wedge_viewport(slot, grid);
                 [None, Some(width)].map(|stroke| Mask {
                     // Namespaced identities stay constant through animation. The
-                    // only variable SVG input, stroke width, is part of the key.
+                    // DPI affects the cropped viewport as well as the stroke width.
                     key: format!(
-                        "__openlogi_ring_wedge_{}_{}",
+                        "__openlogi_ring_wedge_{}_{}_{}",
                         slot.index(),
+                        scale_factor.to_bits(),
                         stroke.map_or(0, |width| f32::from(width).to_bits()),
                     )
                     .into(),
-                    data: geometry.wedge_svg(slot, stroke),
+                    data: geometry.wedge_svg(slot, stroke, viewport),
+                    viewport,
                 })
             }),
         }
     }
 
+    pub fn paint_guides(
+        &self,
+        bounds: Bounds<Pixels>,
+        pose: Pose,
+        color: Hsla,
+        window: &mut Window,
+        cx: &App,
+    ) {
+        if pose.opacity <= 0.0 {
+            return;
+        }
+        self.guides.paint(
+            bounds,
+            pose_transform(bounds, pose, window.scale_factor()),
+            color.opacity(pose.opacity),
+            window,
+            cx,
+        );
+    }
+    pub fn paint_pointer(
+        &self,
+        bounds: Bounds<Pixels>,
+        pose: Pose,
+        colors: [Hsla; 2],
+        window: &mut Window,
+        cx: &App,
+    ) {
+        let transform = pose_transform(bounds, pose, window.scale_factor());
+        for (mask, color) in self.pointer.iter().zip(colors) {
+            mask.paint(bounds, transform, color.opacity(pose.opacity), window, cx);
+        }
+    }
+
+    /// Return owned elements; the caller attaches the button's hover styling.
+    pub fn cancel_layers(&self) -> [gpui::Svg; 2] {
+        self.cancel
+            .each_ref()
+            .map(|data| gpui::svg().data(data.as_bytes()))
+    }
     pub fn matches_scale(&self, scale_factor: f32) -> bool {
         self.scale_factor.to_bits() == scale_factor.to_bits()
     }
 
-    pub fn paint(
+    pub fn paint_wedge(
         &self,
         slot: ActionRingSlot,
         bounds: Bounds<Pixels>,
@@ -59,16 +143,7 @@ impl WedgeMasks {
     ) {
         let transform = pose_transform(bounds, pose, window.scale_factor());
         for (mask, color) in self.slots[slot.index()].iter().zip(colors) {
-            if let Err(error) = window.paint_svg(
-                bounds,
-                mask.key.clone(),
-                Some(mask.data.as_bytes()),
-                transform,
-                color.opacity(pose.opacity),
-                cx,
-            ) {
-                tracing::warn!(?error, "could not paint Actions Ring SVG mask");
-            }
+            mask.paint(bounds, transform, color.opacity(pose.opacity), window, cx);
         }
     }
 }
@@ -93,53 +168,40 @@ mod tests {
     fn masks_parse_and_have_distinct_stable_cache_keys_at_each_dpi() {
         let renderer = gpui::SvgRenderer::new(Arc::new(()));
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let masks = WedgeMasks::new(scale);
+            let masks = RingMasks::new(scale);
             assert!(masks.matches_scale(scale));
             assert!(!masks.matches_scale(scale + 0.25));
             let mut keys = HashSet::new();
-            for mask in masks.slots.iter().flatten() {
+            for mask in cached_layers(&masks) {
                 assert!(keys.insert(mask.key.clone()));
                 renderer.parse_svg(mask.data.as_bytes()).unwrap();
             }
-            let rebuilt = WedgeMasks::new(scale);
-            for (a, b) in masks
-                .slots
-                .iter()
-                .flatten()
-                .zip(rebuilt.slots.iter().flatten())
-            {
+            let rebuilt = RingMasks::new(scale);
+            for (a, b) in cached_layers(&masks).zip(cached_layers(&rebuilt)) {
                 assert_eq!(a.key, b.key);
                 assert_eq!(a.data, b.data);
             }
+            assert_eq!(masks.cancel, rebuilt.cancel);
         }
     }
 
     #[test]
     fn rasterized_wedges_match_slot_centers_and_have_antialiased_edges() {
         let renderer = gpui::SvgRenderer::new(Arc::new(()));
-        for (scale, physical_size) in [(1.0, 360_u16), (1.25, 450), (1.5, 540), (2.0, 720)] {
-            let masks = WedgeMasks::new(scale);
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let masks = RingMasks::new(scale);
             let geometry = Geometry::new(Bounds::new(
                 Point::default(),
                 size(px(WINDOW_SIZE), px(WINDOW_SIZE)),
             ));
             for slot in ActionRingSlot::ALL {
-                let parsed = renderer
-                    .parse_svg(masks.slots[slot.index()][0].data.as_bytes())
-                    .unwrap();
-                let extent = gpui::DevicePixels(i32::from(physical_size));
+                let mask = &masks.slots[slot.index()][0];
+                let parsed = renderer.parse_svg(mask.data.as_bytes()).unwrap();
                 let image = renderer
-                    .render_parsed(&parsed, gpui::SvgSize::ExactSize(size(extent, extent)))
+                    .render_parsed(&parsed, gpui::SvgSize::ScaleFactor(scale))
                     .unwrap();
                 let bytes = image.as_bytes(0).unwrap();
-                let sample = |point: Point<Pixels>| {
-                    // Bounded test coordinates are inside the 360-logical-pixel canvas.
-                    let x = f32::from(point.x) * scale;
-                    let y = f32::from(point.y) * scale;
-                    let x = (0..physical_size).find(|v| f32::from(*v + 1) > x).unwrap();
-                    let y = (0..physical_size).find(|v| f32::from(*v + 1) > y).unwrap();
-                    bytes[(usize::from(y) * usize::from(physical_size) + usize::from(x)) * 4 + 3]
-                };
+                let sample = |point| alpha_at(&image, mask.viewport, point);
                 for candidate in ActionRingSlot::ALL {
                     let alpha = sample(geometry.content_center(candidate, Pose::REST));
                     assert_eq!(alpha, if candidate == slot { 255 } else { 0 });
@@ -189,6 +251,134 @@ mod tests {
                     assert!(f32::from(painted.y - expected.y).abs() < 0.001);
                 }
             }
+        }
+    }
+
+    fn cached_layers(masks: &RingMasks) -> impl Iterator<Item = &Mask> {
+        masks
+            .slots
+            .iter()
+            .flatten()
+            .chain(std::iter::once(&masks.guides))
+            .chain(&masks.pointer)
+    }
+
+    #[test]
+    fn decorations_keep_transparent_backgrounds_and_fractional_edge_coverage() {
+        let renderer = gpui::SvgRenderer::new(Arc::new(()));
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let masks = RingMasks::new(scale);
+            let decorations = std::iter::once(&masks.guides)
+                .chain(&masks.pointer)
+                .map(|mask| (&mask.data, mask.viewport))
+                .chain(
+                    masks
+                        .cancel
+                        .iter()
+                        .map(|data| (data, square(super::super::geometry::CANCEL_SIZE))),
+                );
+            for (data, viewport) in decorations {
+                let parsed = renderer.parse_svg(data.as_bytes()).unwrap();
+                let image = renderer
+                    .render_parsed(&parsed, gpui::SvgSize::ScaleFactor(scale))
+                    .unwrap();
+                let bytes = image.as_bytes(0).unwrap();
+                assert_eq!(bytes[3], 0, "transparent corner must not introduce a frame");
+                let alpha: Vec<_> = bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|pixel| pixel[3])
+                    .collect();
+                assert!(alpha.iter().any(|value| *value > 0));
+                assert!(alpha.iter().any(|value| *value > 0 && *value < 255));
+                if data == &masks.cancel[0] {
+                    assert_eq!(alpha_at(&image, viewport, viewport.center()), 255);
+                } else if data == &masks.cancel[1] {
+                    assert_eq!(alpha_at(&image, viewport, viewport.center()), 0);
+                } else {
+                    assert_eq!(alpha_at(&image, viewport, square(WINDOW_SIZE).center()), 0);
+                }
+            }
+            assert_eq!(masks.guides.data.matches("<circle ").count(), 3);
+            assert_eq!(masks.guides.data.matches("<path ").count(), 88);
+            assert_eq!(masks.guides.data.matches("stroke-dasharray").count(), 1);
+        }
+    }
+
+    fn alpha_at(image: &gpui::RenderImage, viewport: Bounds<Pixels>, point: Point<Pixels>) -> u8 {
+        if !viewport.contains(&point) {
+            return 0;
+        }
+        let extent = image.size(0);
+        let width = u16::try_from(extent.width.0).unwrap();
+        let height = u16::try_from(extent.height.0).unwrap();
+        let offset = point - viewport.origin;
+        let x = f32::from(offset.x) / f32::from(viewport.size.width) * f32::from(width);
+        let y = f32::from(offset.y) / f32::from(viewport.size.height) * f32::from(height);
+        let x = (0..width).find(|v| f32::from(*v + 1) > x).unwrap();
+        let y = (0..height).find(|v| f32::from(*v + 1) > y).unwrap();
+        image.as_bytes(0).unwrap()[(usize::from(y) * usize::from(width) + usize::from(x)) * 4 + 3]
+    }
+    #[test]
+    fn pointer_rotation_remains_continuous_across_cardinal_angles() {
+        let bounds = Bounds::new(Point::default(), size(px(WINDOW_SIZE), px(WINDOW_SIZE)));
+        let geometry = Geometry::new(bounds);
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rest = geometry
+                .content_center(ActionRingSlot::Top, Pose::REST)
+                .map(|p| p * scale);
+            for angle in [
+                -0.01, 0.0, 0.01, 89.99, 90.0, 90.01, 179.99, 180.01, 359.99, 360.01,
+            ] {
+                let pose = Pose {
+                    rotation: angle,
+                    ..Pose::REST
+                };
+                let painted = pose_transform(bounds, pose, scale).apply(rest);
+                let expected = geometry
+                    .content_center(ActionRingSlot::Top, pose)
+                    .map(|p| p * scale);
+                assert!(f32::from(painted.x - expected.x).abs() < 0.001);
+                assert!(f32::from(painted.y - expected.y).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual cold SVG rasterization timing; no GPU or hardware required"]
+    fn cold_rasterization_timing() {
+        let renderer = gpui::SvgRenderer::new(Arc::new(()));
+        let started = std::time::Instant::now();
+        let masks = RingMasks::new(1.5);
+        for mask in cached_layers(&masks) {
+            let at = std::time::Instant::now();
+            let svg = renderer.parse_svg(mask.data.as_bytes()).unwrap();
+            let _ = renderer
+                .render_parsed(&svg, gpui::SvgSize::ScaleFactor(1.5))
+                .unwrap();
+            eprintln!("{}: {:?}", mask.key, at.elapsed());
+        }
+        eprintln!("cold masks total: {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn cold_masks_do_not_rasterize_a_full_window_per_small_shape() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let masks = RingMasks::new(scale);
+            let area = |bounds: Bounds<Pixels>| {
+                f32::from(bounds.size.width) * f32::from(bounds.size.height)
+            };
+            let full = area(square(WINDOW_SIZE));
+            for mask in masks.slots.iter().flatten() {
+                assert!(area(mask.viewport) < full * 0.2);
+            }
+            for mask in &masks.pointer {
+                assert!(area(mask.viewport) < full * 0.01);
+            }
+            // Group opacity allocates intermediate full-canvas surfaces. Stroke
+            // opacity gives these non-overlapping guide groups the same weights.
+            assert!(!masks.guides.data.contains(" opacity="));
         }
     }
 }

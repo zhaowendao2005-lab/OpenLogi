@@ -18,11 +18,11 @@ use crate::ring::RingView;
 
 pub(crate) struct ClickAwaySession(AtomicU64);
 
-/// Publication guard tied to the lifetime of one ring view.
+/// Publication guard for one ring's interactive phase (not its visual exit).
 ///
 /// Dropping an older view cannot clear a replacement's session: teardown uses
 /// a compare-and-exchange against the id this guard published.
-#[must_use = "the guard must live as long as its ring view"]
+#[must_use = "the guard must live until the ring stops accepting input"]
 pub(crate) struct ShowingRing {
     live: Arc<ClickAwaySession>,
     session_id: u64,
@@ -112,12 +112,11 @@ pub(crate) fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
         let Some(ring) = handle.downcast::<RingView>() else {
             continue;
         };
-        let _ = ring.update(cx, |view, window, _| {
+        let _ = ring.update(cx, |view, window, cx| {
             if !click_away_targets(session_id, view.session_id()) {
                 return;
             }
-            view.cancel();
-            window.remove_window();
+            view.cancel(window, cx);
         });
     }
 }

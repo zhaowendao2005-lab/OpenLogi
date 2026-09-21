@@ -136,6 +136,9 @@ pub enum HookEvent {
 pub enum MouseEvent {
     /// A mouse button was pressed or released.
     Button {
+        /// Location carried by this native event: physical pixels on Windows, points on macOS.
+        /// None when the backend cannot provide compositor coordinates (evdev).
+        position: Option<(f64, f64)>,
         /// Which button.
         id: ButtonId,
         /// `true` = button down; `false` = button up.
