@@ -1,60 +1,40 @@
-//! The ring itself: the GPUI view, and the window it is drawn in.
-//!
-//! Placement is the interesting part — the panel is centred on the cursor and
-//! clamped to the display it came up on, so a ring raised near a screen edge
-//! stays whole instead of being cut off.
+//! Native vector presentation for the cursor-centred Actions Ring.
+//! Session commands and window placement remain owned by their existing layers.
 
-#[cfg(any(not(target_os = "windows"), test))]
-use gpui::{Bounds, Pixels, Point, Size, point};
+mod geometry;
+mod masks;
+mod motion;
+mod paint;
+
+use std::{cell::Cell, rc::Rc, sync::Arc, time::Instant};
+
 use gpui::{
-    Context, Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance, WindowKind,
-    WindowOptions, div, prelude::FluentBuilder as _, px, svg,
+    Bounds, Context, InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance,
+    WindowKind, WindowOptions, canvas, div, prelude::FluentBuilder as _, px,
 };
+#[cfg(any(not(target_os = "windows"), test))]
+use gpui::{Size, point};
 use openlogi_core::binding::{Action, ActionRingSlot};
-use openlogi_ipc::ActionRingInvocation;
-use openlogi_ui::action_icons::RING_CANCEL_ICON;
-use openlogi_ui::color;
-use std::sync::Arc;
+use openlogi_ipc::{ActionRingInvocation, ActionRingPresentation};
 use tokio::sync::mpsc;
 
 use crate::ipc::OverlayCommand;
 use crate::session::{ClickAwaySession, ShowingRing};
+use geometry::{Geometry, PixelGrid};
+use motion::{Frame, Motion};
 
 pub(crate) const WINDOW_SIZE: f32 = 360.0;
-pub(crate) const SLOT_SIZE: f32 = 54.0;
-pub(crate) const RADIUS: f32 = 122.0;
-
-/// The ring's own neutral scale. It floats over whatever is on the desktop, so
-/// unlike the settings app it cannot take its surfaces from the OS appearance —
-/// it commits to a dark panel and rides its own contrast. Only the accent is
-/// shared (`openlogi_ui::color`); these greys are local by nature.
-const PANEL: Hsla = neutral(0.06, 0.82);
-const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
-const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
-const GLYPH: Hsla = neutral(0.98, 1.0);
-const LABEL: Hsla = neutral(0.94, 1.0);
-const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
-
-const fn neutral(lightness: f32, alpha: f32) -> Hsla {
-    Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: lightness,
-        a: alpha,
-    }
-}
-
-/// The accent deepened for the dark panel: the brand lightness sits too close to
-/// the white glyph a selected slot carries, so the fill drops to `0.48` and the
-/// ring around it rises to `0.78`. Both keep the brand hue and saturation.
-const SELECTED_FILL_L: f32 = 0.48;
-const SELECTED_BORDER_L: f32 = 0.78;
 
 pub(crate) struct RingView {
     invocation: ActionRingInvocation,
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
+    motion: Motion,
+    wedge_masks: Option<Rc<masks::WedgeMasks>>,
+    pointer_position: Option<Point<Pixels>>,
+    /// Layout bookkeeping written by the canvas, not another selection owner.
+    bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Publishes click-away identity for exactly this view's lifetime.
     _showing: ShowingRing,
 }
@@ -71,6 +51,10 @@ impl RingView {
             invocation,
             commands,
             hovered: None,
+            motion: Motion::new(Instant::now()),
+            wedge_masks: None,
+            pointer_position: None,
+            bounds: Rc::new(Cell::new(Bounds::default())),
             _showing: showing,
         }
     }
@@ -80,148 +64,146 @@ impl RingView {
         self.invocation.session_id
     }
 
-    /// Report this ring cancelled. The window is closed by the caller, which
-    /// is the only one holding the handle.
+    /// Report this ring cancelled; the handle owner closes the window.
     pub(crate) fn cancel(&self) {
         let _ = self.commands.send(OverlayCommand::Cancel {
-            session_id: self.invocation.session_id,
+            session_id: self.session_id(),
         });
     }
 
-    fn slot_element(
-        &self,
-        slot: ActionRingSlot,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let presentation = self.invocation.slots.get(&slot)?;
-        let icon_path = presentation.icon.asset_path();
-        let selected = self.hovered == Some(slot);
-        let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
-        let session_id = self.invocation.session_id;
-        let activate = self.commands.clone();
-        Some(
-            div()
-                .id(("ring-slot", slot.index()))
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .size(px(SLOT_SIZE))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(if selected {
-                    color::accent_at_lightness(SELECTED_FILL_L)
-                } else {
-                    SLOT_RESTING
-                })
-                .when(selected, |slot| {
-                    slot.border_2()
-                        .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
-                })
-                .shadow_md()
-                .text_color(GLYPH)
-                .cursor_pointer()
-                .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
-                .on_hover(cx.listener(move |this, hovered, _, cx| {
-                    if *hovered && this.hovered != Some(slot) {
-                        this.hovered = Some(slot);
-                        let _ = this
-                            .commands
-                            .send(OverlayCommand::Hover { session_id, slot });
-                        cx.notify();
-                    } else if !*hovered && this.hovered == Some(slot) {
-                        this.hovered = None;
-                        cx.notify();
-                    }
-                }))
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    window.remove_window();
-                })
-                .into_any_element(),
-        )
+    fn hit_slot(&self, position: Point<Pixels>, frame: Frame) -> Option<ActionRingSlot> {
+        let geometry = Geometry::new(self.bounds.get());
+        // Last painted is topmost when the entering wedges momentarily overlap.
+        ActionRingSlot::ALL.into_iter().rev().find(|slot| {
+            self.invocation.slots.contains_key(slot)
+                && geometry.contains(position, *slot, frame.sectors[slot.index()].pose)
+        })
+    }
+
+    fn hover(&mut self, slot: Option<ActionRingSlot>, cx: &mut Context<Self>) {
+        if self.hovered == slot {
+            return;
+        }
+        self.hovered = slot;
+        self.motion.select(slot, Instant::now());
+        if let Some(slot) = slot {
+            let _ = self.commands.send(OverlayCommand::Hover {
+                session_id: self.session_id(),
+                slot,
+            });
+        }
+        cx.notify();
     }
 }
 
+fn display_label(presentation: &ActionRingPresentation) -> SharedString {
+    // A custom label that coincides with an action name is still literal text.
+    if !presentation.literal
+        && let Some(key) = Action::translation_key_for_label(&presentation.label)
+    {
+        return rust_i18n::t!(key).into_owned().into();
+    }
+    presentation.label.clone().into()
+}
+
 impl Render for RingView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let session_id = self.invocation.session_id;
-        let root_commands = self.commands.clone();
-        let center_commands = self.commands.clone();
-        let hovered_label = self.hovered.and_then(|slot| {
-            let presentation = self.invocation.slots.get(&slot)?;
-            // User-authored labels render verbatim: passing them through the
-            // localization table would translate any label that happens to
-            // collide with a known key ("Copy" → "Copier" under fr).
-            let label = if presentation.literal {
-                presentation.label.clone()
-            } else if let Some(key) = Action::translation_key_for_label(&presentation.label) {
-                rust_i18n::t!(key).into_owned()
-            } else {
-                presentation.label.clone()
-            };
-            Some(SharedString::from(label))
-        });
-        let slots = ActionRingSlot::ALL
-            .into_iter()
-            .filter_map(|slot| self.slot_element(slot, cx))
-            .collect::<Vec<_>>();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let wedge_masks = self
+            .wedge_masks
+            .get_or_insert_with(|| Rc::new(masks::WedgeMasks::new(window.scale_factor())));
+        if !wedge_masks.matches_scale(window.scale_factor()) {
+            *wedge_masks = Rc::new(masks::WedgeMasks::new(window.scale_factor()));
+        }
+        let wedge_masks = Rc::clone(wedge_masks);
+        let frame = self.motion.frame(Instant::now(), cx.reduce_motion());
+        if frame.active {
+            let view = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    // A moving wedge can enter/leave a stationary pointer too.
+                    if let Some(position) = this.pointer_position {
+                        let frame = this.motion.frame(Instant::now(), cx.reduce_motion());
+                        this.hover(this.hit_slot(position, frame), cx);
+                    }
+                    cx.notify();
+                });
+            });
+        }
+        let stationary_grid = (!frame.active).then(|| PixelGrid::new(window.scale_factor()));
+        let enabled = ActionRingSlot::ALL.map(|slot| self.invocation.slots.contains_key(&slot));
+        let bounds = Rc::clone(&self.bounds);
+        let geometry = Geometry::new(Bounds::new(
+            Point::default(),
+            gpui::size(px(WINDOW_SIZE), px(WINDOW_SIZE)),
+        ));
+        let hovered_label = self
+            .hovered
+            .and_then(|slot| self.invocation.slots.get(&slot))
+            .map(display_label);
+        let cancel_commands = self.commands.clone();
+        let session_id = self.session_id();
 
         div()
             .id("ring-root")
             .relative()
-            .size_full()
+            .size(px(WINDOW_SIZE))
             .child(
-                div()
-                    .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(WINDOW_SIZE - 36.0))
-                    .rounded_full()
-                    .bg(PANEL)
-                    .shadow_lg(),
+                canvas(
+                    move |area, _, _| bounds.set(area),
+                    move |area, (), window, cx| {
+                        paint::surface(area, enabled, frame, &wedge_masks, window, cx);
+                    },
+                )
+                .absolute()
+                .size_full(),
             )
-            .children(slots)
+            .children(ActionRingSlot::ALL.into_iter().filter_map(|slot| {
+                let presentation = self.invocation.slots.get(&slot)?;
+                Some(paint::slot_content(
+                    geometry,
+                    slot,
+                    presentation.icon.asset_path(),
+                    display_label(presentation),
+                    frame.sectors[slot.index()],
+                    stationary_grid,
+                ))
+            }))
             .child(
-                div()
-                    .id("ring-cancel")
-                    .absolute()
-                    .left(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .top(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .size(px(48.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(CANCEL_RESTING)
-                    .text_color(CANCEL_GLYPH)
-                    .cursor_pointer()
-                    .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        let _ = center_commands.send(OverlayCommand::Cancel { session_id });
-                        window.remove_window();
-                    }),
+                paint::cancel(self.hovered.is_some()).on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let _ = cancel_commands.send(OverlayCommand::Cancel { session_id });
+                    window.remove_window();
+                }),
             )
             .when_some(hovered_label, |ring, label| {
-                ring.child(
-                    div()
-                        .absolute()
-                        .left(px(WINDOW_SIZE / 2.0 - 80.0))
-                        .top(px(WINDOW_SIZE / 2.0 + 34.0))
-                        .w(px(160.0))
-                        .text_center()
-                        .text_sm()
-                        .text_color(LABEL)
-                        .child(label),
-                )
+                ring.child(paint::hover_label(label))
             })
-            .on_click(move |_, window, _| {
-                let _ = root_commands.send(OverlayCommand::Cancel { session_id });
-                window.remove_window();
-            })
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    this.pointer_position = Some(event.position);
+                    this.hover(this.hit_slot(event.position, frame), cx);
+                }),
+            )
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.pointer_position = None;
+                    this.hover(None, cx);
+                }
+            }))
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    if let Some(slot) = this.hit_slot(event.position(), frame) {
+                        let _ = this.commands.send(OverlayCommand::Activate {
+                            session_id: this.session_id(),
+                            slot,
+                        });
+                    } else {
+                        this.cancel();
+                    }
+                    window.remove_window();
+                }),
+            )
     }
 }
 
@@ -257,6 +239,38 @@ pub(crate) fn clamp_window_origin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_labels_are_not_translated_or_normalized() {
+        let presentation = ActionRingPresentation {
+            label: "Copy".into(),
+            literal: true,
+            icon: openlogi_core::binding::ActionRingIcon::Copy,
+        };
+        assert_eq!(display_label(&presentation).as_ref(), "Copy");
+        let presentation = ActionRingPresentation {
+            label: "  自定义 action <&>  ".into(),
+            ..presentation
+        };
+        assert_eq!(
+            display_label(&presentation).as_ref(),
+            "  自定义 action <&>  "
+        );
+    }
+
+    #[test]
+    fn built_in_labels_use_the_shared_catalog() {
+        let presentation = ActionRingPresentation {
+            label: "Copy".into(),
+            literal: false,
+            icon: openlogi_core::binding::ActionRingIcon::Copy,
+        };
+        let key = Action::translation_key_for_label("Copy").expect("known action");
+        assert_eq!(
+            display_label(&presentation).as_ref(),
+            rust_i18n::t!(key).as_ref()
+        );
+    }
 
     #[test]
     fn overlay_origin_is_clamped_to_the_display() {

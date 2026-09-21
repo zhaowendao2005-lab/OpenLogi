@@ -1,0 +1,12 @@
+{
+  "name": "openlogi-dev-tools",
+  "private": true,
+  "type": "module",
+  "description": "Local development launcher for OpenLogi: builds, then runs the agent and the GUI with merged logs. See script/dev.mjs.",
+  "scripts": {
+    "dev": "node script/dev.mjs",
+    "dev:mock": "node script/dev.mjs --mock",
+    "dev:release": "node script/dev.mjs --release",
+    "dev:gui": "node script/dev.mjs --no-agent"
+  }
+}

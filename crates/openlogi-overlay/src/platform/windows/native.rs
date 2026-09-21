@@ -4,14 +4,15 @@
 use anyhow::{Context as _, Result, ensure};
 use gpui::{App, Bounds, DevicePixels, DisplayId, Window, point, size};
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
-use windows_sys::Win32::Foundation::{HWND, POINT};
+use windows_sys::Win32::Foundation::{GetLastError, HWND, POINT, SetLastError};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
     MonitorFromPoint, MonitorFromWindow,
 };
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
+    GWL_STYLE, GetCursorPos, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_POPUP, WS_THICKFRAME,
 };
 
 use super::RingPlacement;
@@ -76,6 +77,10 @@ impl RingPlacement {
             anyhow::bail!("ring window has no Win32 handle");
         };
         let hwnd = handle.hwnd.get() as HWND;
+        // GPUI creates PopUp with a zero style, which Windows promotes to an
+        // overlapped window with a caption/non-client frame. Establish a real
+        // popup before DPI negotiation so the requested bounds are all client area.
+        set_borderless_popup(hwnd)?;
         // Bootstrap a tiny hidden window well inside the selected monitor.
         // SetWindowPos synchronously delivers WM_DPICHANGED; GPUI applies its
         // suggested rectangle and updates rendering scale before this returns.
@@ -85,7 +90,11 @@ impl RingPlacement {
             self.display.center(),
             size(DevicePixels(1), DevicePixels(1)),
         );
-        set_bounds(hwnd, anchor, SWP_NOACTIVATE | SWP_NOZORDER)?;
+        set_bounds(
+            hwnd,
+            anchor,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        )?;
         // SAFETY: hwnd belongs to the still-borrowed window.
         let dpi = unsafe { GetDpiForWindow(hwnd) };
         ensure!(dpi != 0, "could not read ring window DPI");
@@ -125,4 +134,57 @@ fn set_bounds(hwnd: HWND, bounds: Bounds<DevicePixels>, flags: u32) -> Result<()
         return Err(std::io::Error::last_os_error()).context("position Actions Ring window");
     }
     Ok(())
+}
+
+const fn popup_style(style: u32) -> u32 {
+    (style & !(WS_CAPTION | WS_THICKFRAME)) | WS_POPUP
+}
+
+#[expect(
+    unsafe_code,
+    reason = "read/write the style of a live GPUI HWND borrowed on its UI thread"
+)]
+fn set_borderless_popup(hwnd: HWND) -> Result<()> {
+    // SAFETY: the caller borrows a live top-level HWND. GWL_STYLE is a 32-bit
+    // value on both Windows architectures, not a pointer or window procedure.
+    let (style, error) = unsafe {
+        SetLastError(0);
+        let style = GetWindowLongW(hwnd, GWL_STYLE);
+        (style, GetLastError())
+    };
+    if style == 0 && error != 0 {
+        return Err(std::io::Error::from_raw_os_error(error.cast_signed()))
+            .context("read ring window style");
+    }
+    let style = popup_style(style.cast_unsigned()).cast_signed();
+    // SAFETY: same borrowed HWND and 32-bit style slot. A zero previous style
+    // is valid, so clear/read last-error rather than treating zero as failure.
+    let (previous, error) = unsafe {
+        SetLastError(0);
+        let previous = SetWindowLongW(hwnd, GWL_STYLE, style);
+        (previous, GetLastError())
+    };
+    if previous == 0 && error != 0 {
+        return Err(std::io::Error::from_raw_os_error(error.cast_signed()))
+            .context("remove ring window frame");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{WS_CLIPSIBLINGS, WS_VISIBLE};
+
+    #[test]
+    fn popup_removes_non_client_frame_and_preserves_unrelated_styles() {
+        let style = popup_style(WS_CAPTION | WS_THICKFRAME | WS_VISIBLE | WS_CLIPSIBLINGS);
+        assert_eq!(style, WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS);
+        assert_eq!(popup_style(style), style);
+    }
+
+    #[test]
+    fn zero_style_becomes_an_explicit_popup_not_an_overlapped_window() {
+        assert_eq!(popup_style(0), WS_POPUP);
+    }
 }
