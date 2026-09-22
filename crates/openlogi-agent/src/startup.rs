@@ -15,7 +15,7 @@ use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
-use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime};
+use openlogi_agent_core::runtime::{ActionDispatcher, ActionRingTrigger, ActionRuntime};
 use openlogi_agent_core::watchers::shutdown::{StopOutcome, WatcherHandle};
 use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
@@ -119,7 +119,7 @@ fn spawn_ipc_server(
 /// until an action is dispatched, so [`bootstrap`] may start them.
 pub(crate) struct InputServices {
     pub(crate) ring: Arc<ActionRingManager>,
-    pub(crate) triggers: tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
+    pub(crate) triggers: tokio::sync::mpsc::UnboundedReceiver<ActionRingTrigger>,
     pub(crate) dispatcher: ActionDispatcher,
     action_runtime: ActionRuntime,
     pub(crate) scroll_input: ScrollInputHandle,

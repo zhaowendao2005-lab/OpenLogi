@@ -67,6 +67,11 @@ fn main() -> Result<()> {
                 };
                 openlogi_core::locale::activate(invocation.language.as_deref());
                 let session_id = invocation.session_id;
+                tracing::info!(
+                    session_id,
+                    slots = invocation.slots.len(),
+                    "Overlay received Actions Ring invocation"
+                );
                 let started = std::time::Instant::now();
                 let created = cx.update(|cx| -> Result<_> {
                     for handle in cx.windows() {

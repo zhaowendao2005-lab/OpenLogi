@@ -34,6 +34,9 @@ use macos as platform;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
+#[cfg(target_os = "windows")]
+pub use windows::ForegroundWindow;
+
 /// Which isolated edge of a held keyboard chord to synthesize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KeyPhase {

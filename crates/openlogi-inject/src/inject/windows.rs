@@ -1,6 +1,8 @@
 //! Windows helpers for synthesising OS-level input events via `SendInput`.
 #![expect(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
 
+mod foreground;
+
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
@@ -10,6 +12,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
     MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
+
+pub use self::foreground::ForegroundWindow;
 
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
@@ -43,17 +48,15 @@ const VK_MEDIA_NEXT_TRACK: u16 = 0xB0;
 const VK_MEDIA_PREV_TRACK: u16 = 0xB1;
 const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
 
-// XBUTTON1/XBUTTON2 from WinUser.h — windows-sys puts them behind the
-// Win32_UI_WindowsAndMessaging feature; not worth enabling for two
-// integers (same treatment as the VK_* codes above).
-const XBUTTON1: i32 = 1;
-const XBUTTON2: i32 = 2;
-
 /// Windows implementation: classify `action` into an [`Effect`] and
 /// synthesise events via `SendInput`. macOS window-manager actions map to
 /// their Windows equivalents; `CustomShortcut` maps macOS `kVK_*` codes to
 /// Windows virtual-key codes (Cmd → Ctrl).
 pub(super) fn execute(action: &Action) {
+    tracing::debug!(
+        action_key = action.translation_key(),
+        "Entering Windows action injection"
+    );
     match action.effect() {
         Effect::None => {}
         Effect::Click(button) => post_click(button),
@@ -108,6 +111,7 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
 }
 
 fn press_shortcut(shortcut: Shortcut) {
+    tracing::debug!(?shortcut, "Injecting Windows shortcut");
     match combo(shortcut) {
         Ok(combo) => press_combo(&combo),
         Err(vk) => post_key(vk, &[]),
@@ -172,8 +176,8 @@ fn post_click(button: MouseButton) {
         MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
         MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
         // Extra buttons share the X flag pair; mouseData carries which one.
-        MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON1),
-        MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2),
+        MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, i32::from(XBUTTON1)),
+        MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, i32::from(XBUTTON2)),
     };
     send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
 }
@@ -307,9 +311,14 @@ fn send_inputs(inputs: &[INPUT]) {
     };
     // SAFETY: inputs.as_ptr()/input_count describe a valid initialized INPUT slice; SendInput copies it and returns the count injected.
     let sent = unsafe { SendInput(input_count, inputs.as_ptr(), input_size) };
+    tracing::debug!(
+        requested = input_count,
+        sent,
+        "Windows SendInput result (not target application acknowledgement)"
+    );
     if sent != input_count {
         tracing::warn!(
-            requested = inputs.len(),
+            requested = input_count,
             sent,
             "SendInput accepted fewer events than requested"
         );

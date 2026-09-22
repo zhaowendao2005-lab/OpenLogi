@@ -237,21 +237,55 @@ fn coalesce_command(current: OverlayCommand, next: OverlayCommand) -> OverlayCom
 
 type CommandFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-async fn send_command(client: &AgentClient, command: OverlayCommand) -> bool {
-    let ctx = context::current();
-    match command {
-        OverlayCommand::Hover { session_id, slot } => client
-            .action_ring_hover(ctx, session_id, slot)
-            .await
-            .is_ok(),
-        OverlayCommand::Activate { session_id, slot } => client
-            .action_ring_activate(ctx, session_id, slot)
-            .await
-            .is_ok(),
-        OverlayCommand::Cancel { session_id } => {
-            client.action_ring_cancel(ctx, session_id).await.is_ok()
+// `true` means the request has a definitive reply, not that the action ran.
+// Business rejection is terminal; only transport failures warrant reconnecting.
+fn command_reply(
+    command: OverlayCommand,
+    reply: Result<Result<(), openlogi_ipc::ActionRingCommandError>, tarpc::client::RpcError>,
+) -> bool {
+    match reply {
+        Ok(Ok(())) => {
+            if command.is_terminal() {
+                debug!(?command, "Actions Ring command accepted by agent");
+            }
+            true
+        }
+        Ok(Err(error)) => {
+            if command.is_terminal() {
+                warn!(
+                    ?command,
+                    ?error,
+                    "Actions Ring command rejected by agent; not retrying"
+                );
+            } else {
+                debug!(?command, ?error, "Actions Ring hover rejected by agent");
+            }
+            true
+        }
+        Err(error) => {
+            warn!(?command, %error, "Actions Ring command transport failed");
+            false
         }
     }
+}
+
+async fn send_command(client: &AgentClient, command: OverlayCommand) -> bool {
+    let ctx = context::current();
+    if command.is_terminal() {
+        debug!(?command, "Sending Actions Ring terminal command");
+    }
+    let reply = match command {
+        OverlayCommand::Hover { session_id, slot } => {
+            client.action_ring_hover(ctx, session_id, slot).await
+        }
+        OverlayCommand::Activate { session_id, slot } => {
+            client.action_ring_activate(ctx, session_id, slot).await
+        }
+        OverlayCommand::Cancel { session_id } => {
+            client.action_ring_cancel(ctx, session_id).await.map(Ok)
+        }
+    };
+    command_reply(command, reply)
 }
 
 async fn send_commands(rx: &mut mpsc::UnboundedReceiver<OverlayCommand>) {

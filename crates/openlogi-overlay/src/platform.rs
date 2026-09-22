@@ -173,9 +173,33 @@ pub(crate) fn release_pointer(_window: &gpui::Window) {
     }
 }
 
+/// Wayland honours an empty input region; X11 has no GPUI equivalent, so the
+/// call reaches `PlatformWindow`'s default no-op and the departing ring keeps
+/// swallowing clicks there until it is destroyed.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(crate) fn release_pointer(window: &gpui::Window) {
     window.set_input_region(Some(&[]));
+}
+
+/// Whether outside-click dismissal is the agent's job on this platform.
+///
+/// Dismissing the ring on a click beside it has exactly one owner per platform.
+/// macOS owns it natively in [`watch_clicks_outside`]: a global `NSEvent`
+/// monitor sees the click without consuming it, so arming the agent as well
+/// would make one click cancel the session twice, from two owners that cannot
+/// see each other. Linux cannot own it either way — the evdev backend reports
+/// no compositor coordinates ([`openlogi_hook::MouseEvent::Button::position`]
+/// is `None` there), so the agent has nothing to hit-test a click against.
+///
+/// Windows has neither a global monitor nor a native dismissal path, which is
+/// why the input region exists: the agent's hook already sees every click in
+/// screen coordinates, and the published region is what makes that click
+/// attributable to a ring session.
+///
+/// This gates only the *lease* — the region value itself is still recorded on
+/// every platform, because the cursor warp is expressed against its origin.
+pub(crate) const fn publishes_input_region() -> bool {
+    cfg!(target_os = "windows")
 }
 
 /// Hide before destruction so native hover/activation notifications can run

@@ -21,6 +21,9 @@ devenv.local.yaml
 !/.agents/setup
 !/.agents/rules/
 !/.agents/skills/
+# Merge notes and deferred-issue records: findings worth carrying across
+# sessions and reviewers, not per-developer scratch.
+!/.agents/merge&&issue/
 /.agents/skills/*
 !/.agents/skills/gpui-kit/
 !/.agents/skills/gpui-kit-design-guides/

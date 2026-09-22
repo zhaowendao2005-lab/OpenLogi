@@ -6,6 +6,9 @@ use openlogi_core::binding::ActionRingSlot;
 
 use super::geometry::{Pose, shortest_turn, slot_angle};
 
+const OPEN_DURATION: Duration = Duration::from_millis(180);
+const OPEN_FADE_DURATION: Duration = Duration::from_millis(90);
+
 const CLOSE_DURATION: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy)]
@@ -132,7 +135,7 @@ impl Motion {
             } else {
                 progress(elapsed, self.speed.duration(CLOSE_DURATION))
             };
-            let fold = amount * amount * (3.0 - 2.0 * amount);
+            let fold = smoothstep(amount);
             let retract = |pose: Pose| Pose {
                 scale: pose.scale * (1.0 - 0.66 * fold),
                 rotation: pose.rotation - 62.0 * fold,
@@ -162,47 +165,36 @@ impl Motion {
                 tween.sample(now)
             }
         };
-        let sectors = ActionRingSlot::ALL.map(|slot| {
-            let deploy = if reduce_motion {
-                1.0
-            } else {
-                let delay = Duration::from_secs_f32(0.045 + slot_angle(slot) / 45.0 * 0.008);
-                ease(progress(
-                    elapsed.saturating_sub(delay),
-                    Duration::from_millis(180),
-                ))
-            };
-            SectorFrame {
-                pose: Pose {
-                    scale: 0.34 + 0.66 * deploy,
-                    rotation: -62.0 * (1.0 - deploy),
-                    opacity: deploy,
-                },
-                highlight: value(self.highlight[slot.index()]),
-                content_scale: 1.0 + 0.055 * value(self.content[slot.index()]),
-            }
-        });
+        // One pose keeps the entire ring readable throughout its short entry.
         let deploy = if reduce_motion {
             1.0
         } else {
-            ease(progress(
-                elapsed.saturating_sub(Duration::from_millis(45)),
-                Duration::from_millis(180),
-            ))
+            smoothstep(progress(elapsed, OPEN_DURATION))
         };
+        let opacity = if reduce_motion {
+            1.0
+        } else {
+            smoothstep(progress(elapsed, OPEN_FADE_DURATION))
+        };
+        let pose = Pose {
+            scale: 0.80 + 0.20 * deploy,
+            rotation: -12.0 * (1.0 - deploy),
+            opacity,
+        };
+        let sectors = ActionRingSlot::ALL.map(|slot| SectorFrame {
+            pose,
+            highlight: value(self.highlight[slot.index()]),
+            content_scale: 1.0 + 0.055 * value(self.content[slot.index()]),
+        });
         Frame {
             sectors,
             pointer_angle: value(self.pointer),
-            pointer_opacity: value(self.visibility) * deploy,
-            guides: Pose {
-                scale: 0.34 + 0.66 * deploy,
-                rotation: -62.0 * (1.0 - deploy),
-                opacity: deploy,
-            },
-            core_opacity: 1.0,
+            pointer_opacity: value(self.visibility) * opacity,
+            guides: pose,
+            core_opacity: opacity,
             closed: false,
             active: !reduce_motion
-                && (elapsed < Duration::from_millis(281)
+                && (elapsed < OPEN_DURATION
                     || self
                         .highlight
                         .iter()
@@ -212,6 +204,10 @@ impl Motion {
                     || self.visibility.active(now)),
         }
     }
+}
+
+fn smoothstep(amount: f32) -> f32 {
+    amount * amount * (3.0 - 2.0 * amount)
 }
 
 fn progress(elapsed: Duration, duration: Duration) -> f32 {
@@ -241,23 +237,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deployment_is_staggered_and_eventually_stops() {
+    fn deployment_is_immediate_synchronized_and_stops_on_time() {
         let now = Instant::now();
-        let motion = Motion::new(
-            now,
-            openlogi_core::binding::ActionRingAnimationSpeed::try_new(100).unwrap(),
-        );
-        let early = motion.frame(now + Duration::from_millis(80), false);
-        assert!(early.sectors[0].pose.opacity > early.sectors[3].pose.opacity);
-        assert!(early.sectors[7].pose.opacity.abs() < f32::EPSILON);
-        let settled = motion.frame(now + Duration::from_secs(1), false);
-        assert!(!settled.active);
-        assert!(
-            settled
-                .sectors
-                .iter()
-                .all(|sector| (sector.pose.scale - 1.0).abs() < f32::EPSILON)
-        );
+        for percent in [50, 80, 100, 200] {
+            let speed = openlogi_core::binding::ActionRingAnimationSpeed::try_new(percent).unwrap();
+            let motion = Motion::new(now, speed);
+            let first = motion.before_show(false);
+            assert!((first.guides.scale - 0.80).abs() < 0.001);
+            assert!((first.guides.rotation + 12.0).abs() < 0.001);
+            assert!(first.core_opacity.abs() < f32::EPSILON);
+            for millis in [1, 45, 90, 179, 180] {
+                let frame =
+                    motion.frame(now + speed.duration(Duration::from_millis(millis)), false);
+                assert!(frame.core_opacity > 0.0);
+                for sector in frame.sectors {
+                    assert!((sector.pose.opacity - frame.core_opacity).abs() < 0.001);
+                    assert!((sector.pose.scale - frame.guides.scale).abs() < 0.001);
+                    assert!((sector.pose.rotation - frame.guides.rotation).abs() < 0.001);
+                }
+                assert!((frame.guides.opacity - frame.core_opacity).abs() < 0.001);
+                assert_eq!(frame.active, millis < 180);
+                if millis >= 90 {
+                    assert!((frame.core_opacity - 1.0).abs() < 0.001);
+                }
+                if millis == 180 {
+                    assert!((frame.guides.scale - 1.0).abs() < 0.001);
+                    assert!(frame.guides.rotation.abs() < 0.001);
+                }
+            }
+        }
     }
 
     #[test]
@@ -306,14 +314,14 @@ mod tests {
     }
 
     #[test]
-    fn core_precedes_the_spin_and_exit_reverses_without_a_jump() {
+    fn synchronized_entry_and_exit_reverse_without_a_jump() {
         let now = Instant::now();
         let mut motion = Motion::new(
             now,
             openlogi_core::binding::ActionRingAnimationSpeed::try_new(100).unwrap(),
         );
         let first = motion.before_show(false);
-        assert!((first.core_opacity - 1.0).abs() < f32::EPSILON);
+        assert!(first.core_opacity.abs() < f32::EPSILON);
         assert!(
             first
                 .sectors
@@ -326,7 +334,7 @@ mod tests {
                 .guides
                 .opacity
                 .abs()
-                < f32::EPSILON
+                > 0.0
         );
         let ready = now + Duration::from_millis(300);
         let before = motion.frame(ready, false);
@@ -357,7 +365,12 @@ mod tests {
             let before = motion.frame(at, false);
             let duration = motion.close(at, false);
             let after = motion.frame(at, false);
-            assert!((after.sectors[0].pose.opacity - before.sectors[0].pose.opacity).abs() < 0.001);
+            for (after, before) in after.sectors.into_iter().zip(before.sectors) {
+                assert!((after.pose.opacity - before.pose.opacity).abs() < 0.001);
+                assert!((after.pose.scale - before.pose.scale).abs() < 0.001);
+                assert!((after.pose.rotation - before.pose.rotation).abs() < 0.001);
+            }
+            assert!((after.core_opacity - before.core_opacity).abs() < 0.001);
             assert!(motion.frame(at + duration, false).closed);
         }
         let mut motion = Motion::new(

@@ -7,11 +7,11 @@
 //
 //   npm run dev            debug 构建，dev profile，日志 debug
 //   npm run dev:mock       无硬件：agent 换成 openlogi-agent-mock
-//   npm run dev:release    release 构建
+//   npm run dev:release    只生成 release 产物，不启动任何进程
 //   npm run dev:gui        只起 GUI（agent 由 GUI 自己按同目录兄弟文件拉起）
 //
 // 直接调用：node script/dev.mjs [--release] [--mock] [--no-agent] [--no-build]
-//                              [--profile dev|prod] [--log <filter>]
+//                              [--profile dev] [--build-only] [--log <filter>]
 //                              [--log-file <path>] [--timeout <sec>]
 //
 // 本文件重复了 Rust 侧的两处决定，改动时以 owner 为准（见 AGENTS.md
@@ -30,9 +30,9 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const IS_WINDOWS = process.platform === "win32";
 
-// 与 transport.rs 同一个名字：Windows 上是固定的 OS 命名空间管道，不随 profile 变化。
-const PIPE_NAME = "openlogi-agent.sock";
-const PIPE_PATH = `\\\\.\\pipe\\${PIPE_NAME}`;
+// 与 transport.rs 同一个名字。Windows 的命名管道不在文件系统中，必须
+// 显式把 profile 编进名称才能隔离 dev/prod。
+const PIPE_NAME = { dev: "openlogi-agent-dev.sock", prod: "openlogi-agent.sock" };
 
 // 与 paths.rs 的 APP_DIR / DEV_APP_DIR 一致。
 const APP_DIR = { dev: "openlogi-dev", prod: "openlogi" };
@@ -81,6 +81,7 @@ function parseArgs(argv) {
     mock: false,
     agent: true,
     build: true,
+    buildOnly: false,
     profile: "dev",
     log: "info",
     logFile: null,
@@ -115,6 +116,9 @@ function parseArgs(argv) {
       case "--no-build":
         opts.build = false;
         break;
+      case "--build-only":
+        opts.buildOnly = true;
+        break;
       case "--profile":
         opts.profile = value();
         break;
@@ -137,8 +141,8 @@ function parseArgs(argv) {
     }
   }
 
-  if (!Object.hasOwn(APP_DIR, opts.profile)) {
-    die(`--profile 只接受 dev 或 prod，收到 ${opts.profile}`);
+  if (opts.profile !== "dev") {
+    die("dev 启动器只允许 dev profile；生产环境请使用 pnpm dev:release 生成产物后手动覆盖安装目录");
   }
   if (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0) {
     die("--timeout 需要是正的秒数");
@@ -247,7 +251,7 @@ function resolveCargo(required) {
 /// 运行中的 agent 是否已经占着 IPC 端点。Windows 查命名管道是否存在；Unix 按
 /// `paths.rs::runtime_dir_for` 的规则找 `agent.sock`。
 function endpointExists(profile) {
-  if (IS_WINDOWS) return fs.existsSync(PIPE_PATH);
+  if (IS_WINDOWS) return fs.existsSync(`\\\\.\\pipe\\${PIPE_NAME[profile]}`);
   const base =
     process.env.XDG_RUNTIME_DIR ??
     process.env.XDG_CONFIG_HOME ??
@@ -330,23 +334,6 @@ async function main() {
   const cargo = resolveCargo(requiredRustVersion());
   say("dev", `cargo ${cargo.version}${cargo.prefix.length > 0 ? `（${cargo.prefix[0]}）` : ""}`);
 
-  if (opts.agent) {
-    // mock 不跑 autostart reconcile（只有真 agent 的 lifecycle 会写 Run 键）。
-    if (!opts.mock) warnAboutAutostart(profile);
-    if (endpointExists(profile)) {
-      const where = IS_WINDOWS ? PIPE_PATH : path.join(APP_DIR[profile], "agent.sock");
-      say(
-        "warn",
-        [
-          `IPC 端点 ${where} 已经被占用 —— 多半是已安装的正式版 agent 还在跑。`,
-          "       Windows 的管道名不随 profile 隔离，本次起的 dev agent 会绑不上它",
-          "       只记一条 \"could not bind IPC socket; IPC disabled\"，而 GUI 连到的是那个进程。",
-          "       请先从托盘 Quit 掉正式版再跑。",
-        ].join("\n"),
-      );
-    }
-  }
-
   const agentBin = opts.mock ? "openlogi-agent-mock" : "openlogi-agent";
   const guiBin = "openlogi-desktop";
 
@@ -371,6 +358,30 @@ async function main() {
       process.exit(built.code ?? 1);
     }
     say("dev", `构建完成（${((Date.now() - started) / 1000).toFixed(1)}s）`);
+  }
+
+  if (opts.buildOnly) {
+    say(
+      "dev",
+      `${buildKind} 产物在 target/${buildKind}；不启动 GUI、agent 或 overlay。请手动把其中的文件覆盖到生产安装目录。`,
+    );
+    process.exit(0);
+  }
+
+  if (opts.agent) {
+    // mock 不跑 autostart reconcile（只有真 agent 的 lifecycle 会写 Run 键）。
+    if (!opts.mock) warnAboutAutostart(profile);
+    if (endpointExists(profile)) {
+      const where = IS_WINDOWS ? `\\\\.\\pipe\\${PIPE_NAME[profile]}` : path.join(APP_DIR[profile], "agent.sock");
+      say(
+        "warn",
+        [
+          `IPC 端点 ${where} 已经被占用 —— 多半是已安装的正式版 agent 还在跑。`,
+          "       如果这是 dev 管道，说明已有另一个 dev agent 正在运行；不会连接生产 agent。",
+          "       请先从托盘 Quit 掉正式版再跑。",
+        ].join("\n"),
+      );
+    }
   }
 
   const childEnv = {

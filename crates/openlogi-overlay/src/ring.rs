@@ -89,8 +89,15 @@ impl RingView {
         self
     }
 
+    /// Record the window's own screen rectangle, and arm the agent's
+    /// outside-click hit test with it where that is the platform's dismissal
+    /// owner ([`crate::platform::publishes_input_region`]). The value is kept
+    /// either way: the cursor warp is expressed against this origin.
     pub(crate) fn publish_input_region(&mut self, region: openlogi_core::action_ring::InputRegion) {
         self.input_region = Some(region);
+        if !crate::platform::publishes_input_region() {
+            return;
+        }
         if let Some(publisher) = &self.region_publisher {
             self.region_lease = Some(crate::ipc::RegionLease::new(
                 publisher.clone(),
@@ -360,6 +367,12 @@ fn display_label(presentation: &ActionRingPresentation) -> SharedString {
 
 impl Render for RingView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let frame = if self.presented {
+            self.motion.frame(Instant::now(), cx.reduce_motion())
+        } else {
+            self.motion.before_show(cx.reduce_motion())
+        };
+        let opening_paint = self.timing.frame(frame.active, frame.guides.opacity > 0.0);
         let ring_masks = self
             .ring_masks
             .get_or_insert_with(|| Rc::new(masks::RingMasks::new(window.scale_factor())));
@@ -367,12 +380,6 @@ impl Render for RingView {
             *ring_masks = Rc::new(masks::RingMasks::new(window.scale_factor()));
         }
         let ring_masks = Rc::clone(ring_masks);
-        let frame = if self.presented {
-            self.motion.frame(Instant::now(), cx.reduce_motion())
-        } else {
-            self.motion.before_show(cx.reduce_motion())
-        };
-        self.timing.frame(frame.active);
         self.request_animation_frame(frame, window, cx);
         let stationary_grid = (!frame.active).then(|| PixelGrid::new(window.scale_factor()));
         let enabled = ActionRingSlot::ALL.map(|slot| self.invocation.slots.contains_key(&slot));
@@ -397,6 +404,12 @@ impl Render for RingView {
                     move |area, _, _| bounds.set(area),
                     move |area, (), window, cx| {
                         paint::surface(area, enabled, frame, &ring_masks, window, cx);
+                        if let Some(started) = opening_paint {
+                            tracing::debug!(
+                                elapsed_us = started.elapsed().as_micros(),
+                                "Actions Ring first visible outer surface painted (CPU, not GPU presentation)"
+                            );
+                        }
                     },
                 )
                 .absolute()

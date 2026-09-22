@@ -89,11 +89,17 @@ impl RingPlacement {
             if let Some((x, y)) = self.event_origin {
                 let bounds = window.bounds();
                 view.publish_input_region(openlogi_core::action_ring::InputRegion {
-                    x: x + f64::from(f32::from(bounds.origin.x)), y: y + f64::from(f32::from(bounds.origin.y)),
-                    width: f64::from(f32::from(bounds.size.width)), height: f64::from(f32::from(bounds.size.height)),
+                    x: x + f64::from(f32::from(bounds.origin.x)),
+                    y: y + f64::from(f32::from(bounds.origin.y)),
+                    width: f64::from(f32::from(bounds.size.width)),
+                    height: f64::from(f32::from(bounds.size.height)),
                 });
             } else {
-                tracing::debug!("Actions Ring outside-click interception unavailable: native event coordinates are not available");
+                // The ring still opens and still dismisses; only the cursor
+                // warp, which is expressed against this origin, is skipped.
+                tracing::debug!(
+                    "Actions Ring window has no native screen origin: cursor warp is unavailable"
+                );
             }
             view.present(cx);
         })

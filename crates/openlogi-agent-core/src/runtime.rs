@@ -26,19 +26,62 @@ use crate::{DpiCycleState, DpiCycles};
 
 /// Application identity captured with a physical press and retained through
 /// asynchronous button dispatch.
+///
+/// A press and the output it produces are not the same instant: a long-press
+/// resolves after its hold, and an Actions Ring slot resolves only once the
+/// user has clicked it — by which time the ring's own overlay window holds the
+/// Windows foreground. The target is therefore captured with the physical
+/// trigger and carried to the output, never re-read at dispatch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ActionDispatchTarget {
+pub enum ActionDispatchTarget {
     /// Safari's Accessibility target at the instant the physical press arrived.
     SafariProcess(i32),
+    /// The Windows foreground window at the instant the trigger arrived.
+    #[cfg(target_os = "windows")]
+    WindowsWindow(openlogi_inject::ForegroundWindow),
     /// The ordinary browser-navigation shortcut target captured outside Safari.
     Keyboard,
 }
 
+/// Trigger payload retained until an Actions Ring slot is activated.
+pub type ActionRingTrigger = (Option<String>, ActionDispatchTarget);
+
 impl ActionDispatchTarget {
+    /// Windows delivers synthetic input to whatever holds the foreground, so
+    /// the window itself is the target. A desktop with no foreground window
+    /// leaves nothing to aim at and falls back to plain injection.
+    #[cfg(target_os = "windows")]
+    fn capture() -> Self {
+        openlogi_inject::ForegroundWindow::capture().map_or(Self::Keyboard, Self::WindowsWindow)
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn capture() -> Self {
         openlogi_hook::frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
     }
 }
+
+/// Aim the OS injector at the window captured with the trigger, immediately
+/// before the synthetic events are sent.
+///
+/// Windows has no per-window injection: `SendInput` feeds the system input
+/// queue and the foreground window receives it. The Actions Ring overlay holds
+/// the foreground from the moment it appears until its exit animation has
+/// finished, so an action activated from a slot would otherwise land in the
+/// closing overlay. Restoring here rather than waiting for the overlay to go
+/// away keeps the animation and the action independent of each other.
+#[cfg(target_os = "windows")]
+fn restore_target_foreground(target: ActionDispatchTarget) {
+    if let ActionDispatchTarget::WindowsWindow(window) = target {
+        window.restore();
+    }
+}
+
+/// macOS and Linux route their overlay and their injection so that the
+/// trigger-time application is still the one receiving input; there is no
+/// foreground to put back.
+#[cfg(not(target_os = "windows"))]
+const fn restore_target_foreground(_target: ActionDispatchTarget) {}
 /// Held output owned by accepted press capabilities rather than by a capture
 /// backend. Because every [`PressToken`] has exactly one terminal event, this
 /// map gives release, cancellation, invalidation, shutdown, and unwinding one
@@ -73,7 +116,7 @@ impl HeldShortcuts {
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     access: DeviceAccess,
-    action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    action_ring: tokio::sync::mpsc::UnboundedSender<ActionRingTrigger>,
 }
 
 impl ActionExecutor {
@@ -82,10 +125,11 @@ impl ActionExecutor {
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
+        debug!(action = %action.label(), device_key = ?device_key, ?target, "dispatching action");
         if matches!(action, Action::ShowActionsRing) {
             if self
                 .action_ring
-                .send(device_key.map(str::to_owned))
+                .send((device_key.map(str::to_owned), target))
                 .is_err()
             {
                 warn!("Actions Ring runtime unavailable — trigger ignored");
@@ -134,7 +178,10 @@ impl ActionExecutor {
                         action,
                         target,
                         openlogi_inject::ax_navigate_browser,
-                        || openlogi_inject::execute(action),
+                        || {
+                            restore_target_foreground(target);
+                            openlogi_inject::execute(action);
+                        },
                     ) {
                         browser_nav_debounce_commit(reservation);
                     } else {
@@ -146,6 +193,7 @@ impl ActionExecutor {
                 None
             }
             other => {
+                restore_target_foreground(target);
                 openlogi_inject::execute(other);
                 None
             }
@@ -241,7 +289,7 @@ impl ActionRuntime {
     pub fn new(
         dpi_cycle: Arc<RwLock<DpiCycles>>,
         access: DeviceAccess,
-        action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+        action_ring: tokio::sync::mpsc::UnboundedSender<ActionRingTrigger>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
@@ -276,6 +324,19 @@ impl ActionDispatcher {
     /// Route one action without blocking the input callback.
     pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.executor.dispatch(action, device_key);
+    }
+
+    /// Route one action at the application captured when its trigger arrived,
+    /// rather than at whatever holds the foreground now. Actions Ring slot
+    /// activations take this path: the ring's own overlay is in front by the
+    /// time the user picks a slot.
+    pub fn dispatch_to(
+        &self,
+        action: &Action,
+        device_key: Option<&str>,
+        target: ActionDispatchTarget,
+    ) {
+        self.executor.dispatch_to(action, device_key, target);
     }
 
     /// Queue one OS-hook down edge without blocking the callback. The returned
@@ -457,6 +518,14 @@ fn dispatch_browser_navigation(
             keyboard();
             true
         }
+        // Windows has no per-window navigation API to prefer: the shortcut is
+        // the navigation, and `keyboard` has already aimed it at the captured
+        // window.
+        #[cfg(target_os = "windows")]
+        ActionDispatchTarget::WindowsWindow(_) => {
+            keyboard();
+            true
+        }
     }
 }
 
@@ -506,6 +575,35 @@ mod tests {
         assert!(dispatch_browser_navigation(
             &Action::BrowserForward,
             ActionDispatchTarget::Keyboard,
+            |_, _| {
+                ax_called = true;
+                true
+            },
+            || keyboard = true,
+        ));
+
+        assert!(!ax_called);
+        assert!(keyboard);
+    }
+
+    /// Windows has no per-window navigation API, so a captured window resolves
+    /// to the same shortcut the keyboard target uses. The caller has already
+    /// aimed that shortcut at the window; taking the Accessibility path here
+    /// instead would send it to a macOS-only API that does not exist.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_captured_windows_window_navigates_by_shortcut() {
+        let Some(window) = openlogi_inject::ForegroundWindow::capture() else {
+            // A headless CI session has no foreground window to capture; the
+            // variant is unreachable there, so there is nothing to assert.
+            return;
+        };
+        let mut ax_called = false;
+        let mut keyboard = false;
+
+        assert!(dispatch_browser_navigation(
+            &Action::BrowserBack,
+            ActionDispatchTarget::WindowsWindow(window),
             |_, _| {
                 ax_called = true;
                 true

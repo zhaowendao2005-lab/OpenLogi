@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node script/dev.mjs",
     "dev:mock": "node script/dev.mjs --mock",
-    "dev:release": "node script/dev.mjs --release",
+    "dev:release": "node script/dev.mjs --release --build-only",
     "dev:gui": "node script/dev.mjs --no-agent"
   }
 }

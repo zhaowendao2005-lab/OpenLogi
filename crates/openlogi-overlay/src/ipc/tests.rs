@@ -223,3 +223,34 @@ fn terminal_retries_last_only_until_the_session_deadline() {
     assert!(!retry_before(Some(past)));
     assert!(!retry_before(None));
 }
+
+#[test]
+fn command_replies_only_retry_transport_failures() {
+    use openlogi_ipc::ActionRingCommandError;
+    for command in [
+        OverlayCommand::Activate {
+            session_id: 7,
+            slot: ActionRingSlot::Top,
+        },
+        OverlayCommand::Hover {
+            session_id: 7,
+            slot: ActionRingSlot::Top,
+        },
+    ] {
+        assert!(command_reply(command, Ok(Ok(()))));
+        for error in [
+            ActionRingCommandError::SessionNotFound,
+            ActionRingCommandError::SlotEmpty,
+        ] {
+            assert!(command_reply(command, Ok(Err(error))));
+        }
+        assert!(!command_reply(
+            command,
+            Err(tarpc::client::RpcError::Shutdown)
+        ));
+    }
+    assert!(command_reply(
+        OverlayCommand::Cancel { session_id: 7 },
+        Ok(Ok(()))
+    ));
+}

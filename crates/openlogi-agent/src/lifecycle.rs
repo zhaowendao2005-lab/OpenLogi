@@ -298,8 +298,8 @@ impl Armed {
                 Some(event) = watchers.next() => {
                     running.apply_watcher(event, &inventory_refresh).await;
                 }
-                Some(device_key) = running.inputs.triggers.recv() => {
-                    running.begin_action_ring(device_key.as_deref()).await;
+                Some((device_key, target)) = running.inputs.triggers.recv() => {
+                    running.begin_action_ring(device_key.as_deref(), target).await;
                 }
                 else => break,
             }
@@ -407,21 +407,35 @@ impl Running {
         }
     }
 
-    async fn begin_action_ring(&self, device_key: Option<&str>) {
+    /// Open one Actions Ring session for a trigger, aimed at the application
+    /// that was in front when the physical press arrived — the ring's own
+    /// overlay takes the foreground from here on, so nothing may re-read it.
+    async fn begin_action_ring(
+        &self,
+        device_key: Option<&str>,
+        target: openlogi_agent_core::runtime::ActionDispatchTarget,
+    ) {
         // A second trigger press while the ring is showing closes it.
         if self.inputs.ring.dismiss_active() {
+            debug!(device_key = ?device_key, "Actions Ring trigger dismissed the showing session");
             return;
         }
         if let Some(session) = self
             .orchestrator
             .lock()
             .await
-            .action_ring_session(device_key)
+            .action_ring_session(device_key, target)
         {
             // Re-arm the firmware haptic engine first: power transitions can
             // clear it, after which plays are accepted without feedback.
             self.ring_haptics.arm(session.haptic_route.clone());
-            self.inputs.ring.begin(session);
+            let invocation = self.inputs.ring.begin(session);
+            info!(
+                session_id = invocation.session_id,
+                slots = invocation.slots.len(),
+                ?target,
+                "Actions Ring session opened"
+            );
         }
     }
 

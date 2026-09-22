@@ -409,6 +409,7 @@ fn ring_outside_click_pairs_release_after_cancel_and_never_swallows_trackpad() {
     use openlogi_core::{action_ring::InputRegion, binding::ActionRingConfig};
     let ring = ActionRingManager::default();
     let invocation = ring.begin(ActionRingSessionSpec {
+        target: ActionDispatchTarget::Keyboard,
         animation_speed: openlogi_core::binding::ActionRingAnimationSpeed::default(),
         device_key: "mouse".into(),
         haptic_route: None,

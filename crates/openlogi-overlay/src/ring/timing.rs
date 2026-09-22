@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 pub(super) struct FrameTiming {
     phase: Option<&'static str>,
     last: Option<Instant>,
+    started: Option<Instant>,
+    opening_paint: Option<Instant>,
     intervals: Vec<Duration>,
 }
 impl FrameTiming {
@@ -12,19 +14,33 @@ impl FrameTiming {
         self.report();
         if tracing::enabled!(tracing::Level::DEBUG) {
             self.phase = Some(phase);
+            let now = Instant::now();
+            self.started = Some(now);
+            self.opening_paint = (phase == "opening").then_some(now);
         }
     }
-    pub fn frame(&mut self, active: bool) {
-        if self.phase.is_none() {
-            return;
-        }
+    pub fn frame(&mut self, active: bool, outer_visible: bool) -> Option<Instant> {
+        self.phase?;
         let now = Instant::now();
+        if let Some(started) = self.started.take() {
+            tracing::debug!(
+                phase = self.phase,
+                elapsed_us = now.saturating_duration_since(started).as_micros(),
+                "Actions Ring first CPU render after phase start"
+            );
+        }
+        let opening_paint = if outer_visible {
+            self.opening_paint.take()
+        } else {
+            None
+        };
         if let Some(last) = self.last.replace(now) {
             self.intervals.push(now.saturating_duration_since(last));
         }
         if !active {
             self.report();
         }
+        opening_paint
     }
     fn report(&mut self) {
         if let Some(phase) = self.phase.take() {
@@ -44,6 +60,8 @@ impl FrameTiming {
             );
         }
         self.last = None;
+        self.started = None;
+        self.opening_paint = None;
         self.intervals.clear();
     }
 }

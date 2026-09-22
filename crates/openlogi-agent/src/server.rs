@@ -317,6 +317,7 @@ impl Agent for AgentServer {
         slot: ActionRingSlot,
     ) -> Result<(), ActionRingCommandError> {
         if let Some(hover) = self.action_ring.hover(session_id, slot)? {
+            info!(session_id, ?slot, "Actions Ring hover accepted");
             self.ring_haptics
                 .play(hover.haptic_route, HapticWaveform::SubtleCollision, "hover");
         }
@@ -329,9 +330,29 @@ impl Agent for AgentServer {
         session_id: u64,
         slot: ActionRingSlot,
     ) -> Result<(), ActionRingCommandError> {
-        let activation = self.action_ring.activate(session_id, slot)?;
-        self.dispatcher
-            .dispatch(&activation.action, Some(&activation.device_key));
+        let activation = self
+            .action_ring
+            .activate(session_id, slot)
+            .inspect_err(|error| {
+                warn!(
+                    session_id,
+                    ?slot,
+                    ?error,
+                    "Actions Ring activation rejected"
+                );
+            })?;
+        info!(
+            session_id,
+            ?slot,
+            action_key = activation.action.translation_key(),
+            target = ?activation.target,
+            "Actions Ring activation accepted; dispatching at the trigger-time target"
+        );
+        self.dispatcher.dispatch_to(
+            &activation.action,
+            Some(&activation.device_key),
+            activation.target,
+        );
         self.ring_haptics.play(
             activation.haptic_route,
             HapticWaveform::DampStateChange,

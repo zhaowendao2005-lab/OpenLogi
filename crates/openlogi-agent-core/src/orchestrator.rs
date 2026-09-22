@@ -755,11 +755,14 @@ impl Orchestrator {
     /// Snapshot the active device and effective ring layout for a new
     /// invocation. `None` means the ring is disabled, empty, or has no active
     /// persistent device. The returned layout is owned so later config and
-    /// foreground-app changes cannot alter an already-open ring session.
+    /// foreground-app changes cannot alter an already-open ring session, and
+    /// `target` is the application the trigger arrived over, carried untouched
+    /// to whichever slot the user ends up activating.
     #[must_use]
     pub fn action_ring_session(
         &self,
         triggering_device: Option<&str>,
+        target: crate::runtime::ActionDispatchTarget,
     ) -> Option<ActionRingSessionSpec> {
         let key = triggering_device.or_else(|| self.current_key())?;
         let device = self
@@ -782,6 +785,7 @@ impl Orchestrator {
         .then(|| device.route.clone())
         .flatten();
         Some(ActionRingSessionSpec {
+            target,
             animation_speed: ring.animation_speed,
             device_key: key.to_owned(),
             haptic_route,

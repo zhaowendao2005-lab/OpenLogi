@@ -25,7 +25,8 @@ use tarpc::tokio_serde::formats::Bincode;
 /// builds keep `~/.config/openlogi/agent.sock`; local macOS `-dev` bundles use
 /// the sibling `openlogi-dev` profile so development agents cannot occupy the
 /// installed app's endpoint. On Windows it is a named pipe in the OS namespace
-/// (`\\.\pipe\openlogi-agent.sock`).
+/// (`\\.\pipe\openlogi-agent.sock` for production and
+/// `\\.\pipe\openlogi-agent-dev.sock` for development).
 ///
 /// # Errors
 ///
@@ -42,10 +43,14 @@ pub fn endpoint_name() -> io::Result<interprocess::local_socket::Name<'static>> 
     #[cfg(windows)]
     {
         use interprocess::local_socket::{GenericNamespaced, ToNsName};
-        // A fixed per-machine pipe name. The default DACL grants the creating
-        // user + administrators, which is acceptable for a single-user desktop;
-        // per-user isolation on a shared machine is a future hardening point.
-        "openlogi-agent.sock".to_ns_name::<GenericNamespaced>()
+        // Keep development and production in separate OS namespaces. Profile
+        // directories cannot isolate Windows named pipes because those pipes
+        // do not live in the filesystem.
+        let pipe = match openlogi_core::paths::Profile::current() {
+            openlogi_core::paths::Profile::Production => "openlogi-agent.sock",
+            openlogi_core::paths::Profile::Dev => "openlogi-agent-dev.sock",
+        };
+        pipe.to_ns_name::<GenericNamespaced>()
     }
 }
 

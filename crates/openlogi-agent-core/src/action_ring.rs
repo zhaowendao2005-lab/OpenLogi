@@ -33,6 +33,8 @@ const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE
 
 /// Immutable input used to open one ring session.
 pub struct ActionRingSessionSpec {
+    /// Foreground target captured when the physical trigger arrived.
+    pub target: crate::runtime::ActionDispatchTarget,
     /// Device-wide appearance and dismissal playback speed.
     pub animation_speed: openlogi_core::binding::ActionRingAnimationSpeed,
     /// Config key of the device whose control opened the ring.
@@ -47,6 +49,8 @@ pub struct ActionRingSessionSpec {
 
 /// A validated slot activation returned to the action dispatcher.
 pub struct ActionRingActivation {
+    /// Foreground target captured when the physical trigger arrived.
+    pub target: crate::runtime::ActionDispatchTarget,
     /// Config key of the device whose control opened the ring.
     pub device_key: String,
     /// Action snapshotted when the ring opened.
@@ -66,6 +70,7 @@ struct Session {
     invocation: ActionRingInvocation,
     device_key: String,
     haptic_route: Option<DeviceRoute>,
+    target: crate::runtime::ActionDispatchTarget,
     actions: BTreeMap<ActionRingSlot, Action>,
     hovered: Option<ActionRingSlot>,
     opened_at: Instant,
@@ -161,6 +166,7 @@ impl ActionRingManager {
         state.active = Some(Session {
             invocation: invocation.clone(),
             device_key: spec.device_key,
+            target: spec.target,
             haptic_route: spec.haptic_route,
             actions,
             hovered: None,
@@ -271,6 +277,7 @@ impl ActionRingManager {
             return Err(ActionRingCommandError::SlotEmpty);
         };
         Ok(ActionRingActivation {
+            target: session.target,
             device_key: session.device_key,
             action,
             haptic_route: session.haptic_route,
@@ -348,6 +355,7 @@ mod tests {
 
     fn spec() -> ActionRingSessionSpec {
         ActionRingSessionSpec {
+            target: crate::runtime::ActionDispatchTarget::Keyboard,
             animation_speed: openlogi_core::binding::ActionRingAnimationSpeed::default(),
             device_key: "mouse-a".to_string(),
             haptic_route: None,
@@ -437,6 +445,25 @@ mod tests {
             manager.activate(invocation.session_id, ActionRingSlot::Top),
             Err(ActionRingCommandError::SessionNotFound)
         ));
+    }
+
+    /// The application an action is aimed at is decided by the physical
+    /// trigger, not by the click that picks a slot: by then the ring's own
+    /// overlay is in front, and on Windows that is where `SendInput` would
+    /// land. Activation must therefore hand back the target `begin` was given,
+    /// never a freshly read one.
+    #[test]
+    fn activation_replays_the_trigger_time_target() {
+        let manager = ActionRingManager::default();
+        let triggered_over = crate::runtime::ActionDispatchTarget::SafariProcess(417);
+        let invocation = manager.begin(ActionRingSessionSpec {
+            target: triggered_over,
+            ..spec()
+        });
+        let activation = manager
+            .activate(invocation.session_id, ActionRingSlot::Top)
+            .expect("a live session must activate its top slot");
+        assert_eq!(activation.target, triggered_over);
     }
 
     #[test]
