@@ -766,6 +766,15 @@ impl Agent for MockAgent {
         false
     }
 
+    async fn action_ring_activate_window(
+        self,
+        _: Context,
+        _session_id: u64,
+        _index: u32,
+    ) -> Result<(), ActionRingCommandError> {
+        Err(ActionRingCommandError::SessionNotFound)
+    }
+
     async fn action_ring_cancel(self, _: Context, _session_id: u64) {}
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {

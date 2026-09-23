@@ -16,13 +16,17 @@
 )]
 
 use std::fmt;
+use std::path::Path;
 
-use windows_sys::Win32::Foundation::{GetLastError, HWND};
-use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HWND};
+use windows_sys::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-    SetForegroundWindow,
+    BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow,
 };
 
 /// The foreground window at the instant a physical trigger arrived.
@@ -32,7 +36,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 /// belong to an entirely different application. The handle is held as its
 /// address rather than as a pointer so the snapshot stays `Send` and can ride
 /// the trigger through the agent's asynchronous dispatch.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ForegroundWindow {
     hwnd: usize,
     thread: u32,
@@ -61,12 +65,60 @@ impl ForegroundWindow {
         if hwnd.is_null() {
             return None;
         }
+        Self::from_handle(hwnd)
+    }
+
+    pub(crate) fn from_handle(hwnd: HWND) -> Option<Self> {
         let (thread, process) = owner(hwnd)?;
         Some(Self {
             hwnd: hwnd.addr(),
             thread,
             process,
         })
+    }
+
+    /// Opaque identity used for in-process window history, never persisted.
+    #[must_use]
+    pub fn identity(self) -> (usize, u32) {
+        (self.hwnd, self.process)
+    }
+
+    /// Lower-cased executable path used as the application identity for
+    /// window grouping. It is read at the trigger boundary and never persisted.
+    #[must_use]
+    pub fn executable_identity(self) -> Option<String> {
+        executable(self.process)
+    }
+
+    /// OpenLogi's overlay is a presentation helper, not an application window
+    /// the user can cycle to. The basename check also covers packaged `.exe`
+    /// paths and development builds.
+    #[must_use]
+    pub fn is_openlogi_overlay(self) -> bool {
+        self.executable_identity().is_some_and(|path| {
+            Path::new(&path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.eq_ignore_ascii_case("openlogi-overlay"))
+        })
+    }
+
+    /// Restore a minimized window before requesting foreground activation.
+    #[must_use]
+    pub fn activate(self) -> bool {
+        let hwnd = self.handle();
+        if owner(hwnd)
+            .is_none_or(|(thread, process)| process != self.process || thread != self.thread)
+        {
+            return false;
+        }
+        // SAFETY: the handle's owner was validated. Restore synchronously so
+        // SetForegroundWindow below cannot race the minimized state change.
+        if unsafe { IsIconic(hwnd) } != 0 {
+            // SAFETY: the handle's owner was validated immediately above.
+            unsafe { ShowWindow(hwnd, SW_RESTORE) };
+        }
+        self.restore()
     }
 
     /// Put this window back in front, and report whether it holds the
@@ -104,11 +156,12 @@ impl ForegroundWindow {
             );
             return false;
         };
-        if process != self.process {
+        if process != self.process || thread != self.thread {
             tracing::warn!(
                 target_window = ?self,
                 process,
-                "the trigger-time window handle was recycled by another process — injecting into the current foreground instead"
+                thread,
+                "the trigger-time window identity changed — injecting into the current foreground instead"
             );
             return false;
         }
@@ -179,6 +232,27 @@ impl ForegroundWindow {
     fn handle(self) -> HWND {
         std::ptr::without_provenance_mut(self.hwnd)
     }
+}
+
+/// Resolve a process id to the lower-cased executable path used by the
+/// foreground-app matcher. Failing closed is important: a process whose
+/// identity cannot be read must never be grouped with an unrelated window.
+fn executable(process_id: u32) -> Option<String> {
+    // SAFETY: the access mask is query-only and the pid is supplied by the OS.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        return None;
+    }
+    let mut buffer = vec![0_u16; 32_768];
+    let mut length = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: `process` is a live query handle and the buffer/out-length are
+    // valid for the duration of the call.
+    let result =
+        unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &raw mut length) };
+    // SAFETY: the handle returned by OpenProcess is owned here and closed once.
+    unsafe { CloseHandle(process) };
+    (result != 0 && length != 0)
+        .then(|| String::from_utf16_lossy(&buffer[..length as usize]).to_lowercase())
 }
 
 /// The thread and process that own `hwnd`, or `None` when the system declines

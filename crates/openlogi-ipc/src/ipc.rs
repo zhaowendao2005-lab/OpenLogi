@@ -63,7 +63,8 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 32;
+/// v33: application-window switching presentations and activation command.
+pub const PROTOCOL_VERSION: u32 = 33;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -395,6 +396,21 @@ pub struct ActionRingInvocation {
     pub language: Option<String>,
     /// Playback speed snapshotted when the session opened.
     pub animation_speed: openlogi_core::binding::ActionRingAnimationSpeed,
+    /// Window picker or passive short-press feedback, in the same overlay window.
+    pub windows: Option<AppWindowsPresentation>,
+}
+
+/// Presentation-only window list. Indices are scoped to this immutable session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppWindowsPresentation {
+    /// Native window titles, ordered by most recent visit.
+    pub titles: Vec<String>,
+    /// Window selected by a successful short press, if any.
+    pub selected: Option<u32>,
+    /// Passive feedback does not capture mouse or keyboard input.
+    pub feedback: bool,
+    /// Localizable failure message, if enumeration or activation was unavailable.
+    pub error: Option<String>,
 }
 
 /// The ring the overlay should be showing, stamped with its generation.
@@ -421,6 +437,8 @@ pub enum ActionRingCommandError {
     SessionNotFound,
     /// The selected position has no action.
     SlotEmpty,
+    /// The selected native window disappeared or could not be activated.
+    WindowUnavailable,
 }
 
 /// What kind of client a connection is, declared through
@@ -573,4 +591,10 @@ pub trait Agent {
         session_id: u64,
         region: Option<openlogi_core::action_ring::InputRegion>,
     ) -> bool;
+
+    /// Activate a specific window from an open window-picker ring session.
+    async fn action_ring_activate_window(
+        session_id: u64,
+        index: u32,
+    ) -> Result<(), ActionRingCommandError>;
 }

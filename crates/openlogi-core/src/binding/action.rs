@@ -187,6 +187,10 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Tap to cycle application windows; hold for one second to choose a window.
+    SwitchAppWindow,
+    /// Open the current application's window picker, including from a gesture.
+    ShowAppWindows,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -259,6 +263,8 @@ macro_rules! for_each_unit_action {
             // Navigation
             MissionControl "Mission Control" "actions.mission_control" Navigation Grid,
             AppExpose "App Exposé" "actions.app_expose" Navigation Layers,
+            SwitchAppWindow "Switch App Window" "actions.switch_app_window" Navigation Layers,
+            ShowAppWindows "App Windows" "actions.show_app_windows" Navigation Layers,
             PreviousDesktop "Previous Desktop" "actions.previous_desktop" Navigation PreviousDesktop,
             NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,

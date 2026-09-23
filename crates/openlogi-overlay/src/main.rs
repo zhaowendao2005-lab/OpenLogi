@@ -73,13 +73,42 @@ fn main() -> Result<()> {
                     "Overlay received Actions Ring invocation"
                 );
                 let started = std::time::Instant::now();
+                let picker = invocation
+                    .windows
+                    .as_ref()
+                    .is_some_and(|windows| !windows.feedback);
+                let reuse_handle = cx.update(|cx| {
+                    cx.windows()
+                        .into_iter()
+                        .find_map(|handle| handle.downcast::<RingView>())
+                });
+                if let Some(handle) = reuse_handle {
+                    let invocation_clone = invocation.clone();
+                    let adopted = handle.update(cx, |view, window, cx| {
+                        view.adopt(invocation_clone, &live_session, window, cx);
+                    });
+                    if adopted.is_ok() {
+                        cx.spawn(async move |cx| {
+                            cx.background_executor().timer(DISPLAY_LIFETIME).await;
+                            let _ = handle.update(cx, |view, window, cx| {
+                                if view.session_id() == session_id {
+                                    view.cancel(window, cx);
+                                }
+                            });
+                        })
+                        .detach();
+                        continue;
+                    }
+                }
                 let created = cx.update(|cx| -> Result<_> {
                     for handle in cx.windows() {
                         let _ =
                             handle.update(cx, |_, window, cx| platform::close_window(window, cx));
                     }
                     let placement = RingPlacement::capture(cx)?;
-                    let handle = cx.open_window(placement.window_options(), |_, cx| {
+                    let mut options = placement.window_options();
+                    options.focus = picker;
+                    let handle = cx.open_window(options, |_, cx| {
                         cx.new(|_| {
                             RingView::new(invocation, commands.clone(), &live_session)
                                 .with_region_publisher(regions.clone())
@@ -110,7 +139,11 @@ fn main() -> Result<()> {
                 );
                 cx.spawn(async move |cx| {
                     cx.background_executor().timer(DISPLAY_LIFETIME).await;
-                    let _ = handle.update(cx, RingView::cancel);
+                    let _ = handle.update(cx, |view, window, cx| {
+                        if view.session_id() == session_id {
+                            view.cancel(window, cx);
+                        }
+                    });
                 })
                 .detach();
             }

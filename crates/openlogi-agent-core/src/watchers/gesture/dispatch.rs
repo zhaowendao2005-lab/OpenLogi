@@ -8,7 +8,7 @@ use std::time::Instant;
 use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_hid::CapturedInput;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
@@ -158,6 +158,10 @@ impl InputDispatcher {
                     .or_else(|| plan.side_gesture_bindings.get(&button))
                     .and_then(|map| map.get(&direction))
                 {
+                    if matches!(action, Action::SwitchAppWindow) {
+                        warn!(key, %button, ?direction, "window cycling is ignored for gesture activation");
+                        return;
+                    }
                     debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
                     if !self
                         .outputs
@@ -199,15 +203,7 @@ impl InputDispatcher {
                 self.gesture_presses.end(session, button);
             }
             CapturedInput::ButtonPulse(button) => {
-                let binding = plan.bindings.get(&button);
-                if let Some(binding) = binding {
-                    debug!(key, ?button, action = %binding.click_action().label(), "HID++ button pulse → binding");
-                } else {
-                    debug!(key, ?button, "HID++ button pulse with no binding — ignored");
-                }
-                self.outputs
-                    .actions
-                    .dispatch_hidpp_button_pulse(session, button, binding);
+                self.dispatch_button_pulse(session, plan, button, key);
             }
             CapturedInput::Scroll {
                 increments,
@@ -238,6 +234,38 @@ impl InputDispatcher {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
         }
+    }
+
+    fn dispatch_button_pulse(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        button: ButtonId,
+        key: &str,
+    ) {
+        let binding = plan.bindings.get(&button);
+        let is_gesture = plan.gesture_bindings.contains_key(&button)
+            || plan.side_gesture_bindings.contains_key(&button);
+        if is_gesture
+            && binding
+                .is_some_and(|binding| matches!(binding.click_action(), Action::SwitchAppWindow))
+        {
+            warn!(key, %button, "window cycling is ignored for gesture activation");
+            return;
+        }
+        if let Some(binding) = binding {
+            debug!(
+                key,
+                ?button,
+                action = %binding.click_action().label(),
+                "HID++ button pulse → binding"
+            );
+        } else {
+            debug!(key, ?button, "HID++ button pulse with no binding — ignored");
+        }
+        self.outputs
+            .actions
+            .dispatch_hidpp_button_pulse(session, button, binding);
     }
 }
 

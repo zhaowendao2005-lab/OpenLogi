@@ -101,7 +101,7 @@ impl RingPlacement {
                     "Actions Ring window has no native screen origin: cursor warp is unavailable"
                 );
             }
-            view.present(cx);
+            view.present(window, cx);
         })
     }
 }

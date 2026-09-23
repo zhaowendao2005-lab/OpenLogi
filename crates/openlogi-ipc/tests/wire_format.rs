@@ -46,9 +46,10 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
-    Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    AgentSnapshot, AgentStatus, AppWindowsPresentation, ClientKind, ConfigReloadError,
+    ForegroundApps, FoundDevice, Identity, InventoryHealth, MonitorEvent, Observation,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation,
 };
 use succession::{Compat, Run};
 
@@ -102,7 +103,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 32);
+    assert_eq!(PROTOCOL_VERSION, 33);
 }
 
 #[test]
@@ -272,8 +273,9 @@ fn action_ring_types() {
                 },
             )]),
             language: Some("fr".to_string()),
+            windows: None,
         },
-        "2a01000343757400070102667250",
+        "2a0100034375740007010266725000",
     );
     // The literal flag is one byte between label and icon.
     assert_wire(
@@ -296,6 +298,16 @@ fn action_ring_types() {
     );
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
+    assert_wire(&ActionRingCommandError::WindowUnavailable, "02");
+    assert_wire(
+        &AppWindowsPresentation {
+            titles: vec!["Editor".to_string()],
+            selected: Some(0),
+            feedback: false,
+            error: None,
+        },
+        "0106456469746f7201000000",
+    );
     assert_wire(&HidppOperation::PlayHaptic, "0e");
 }
 

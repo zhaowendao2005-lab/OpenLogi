@@ -1,5 +1,6 @@
 //! OS input-event synthesis split out of openlogi-core so the core stays platform- and IO-free.
 
+pub mod app_windows;
 mod inject;
 
 pub use inject::{

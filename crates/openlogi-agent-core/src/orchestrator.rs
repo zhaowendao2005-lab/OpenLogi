@@ -29,7 +29,7 @@ use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use crate::action_ring::ActionRingSessionSpec;
+use crate::action_ring::{ActionRingSessionSpec, WindowSessionSpec};
 use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
@@ -790,6 +790,29 @@ impl Orchestrator {
             device_key: key.to_owned(),
             haptic_route,
             layout,
+            language: self.config.app_settings.language.clone(),
+        })
+    }
+
+    /// Snapshot the presentation settings for an application-window session.
+    /// Window switching does not depend on the Actions Ring being enabled, but
+    /// it uses the same device-scoped animation and locale settings.
+    #[must_use]
+    pub fn window_session(
+        &self,
+        triggering_device: Option<&str>,
+        target: crate::runtime::ActionDispatchTarget,
+    ) -> Option<WindowSessionSpec> {
+        let key = triggering_device.or_else(|| self.current_key())?;
+        let device = self
+            .devices
+            .iter()
+            .find(|device| device.config_key == key)?;
+        let ring = self.config.action_ring(key);
+        Some(WindowSessionSpec {
+            target,
+            device_key: device.config_key.clone(),
+            animation_speed: ring.animation_speed,
             language: self.config.app_settings.language.clone(),
         })
     }

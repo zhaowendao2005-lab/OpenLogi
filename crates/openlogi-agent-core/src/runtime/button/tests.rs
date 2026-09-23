@@ -18,6 +18,33 @@ fn long_press(short: Action, long: Action) -> Binding {
     Binding::LongPress(LongPressBinding::new(short, long))
 }
 
+#[test]
+fn window_switch_uses_one_second_and_release_cannot_dismiss_picker() {
+    let pressed_at = Instant::now();
+    let binding = Binding::Single(Action::SwitchAppWindow);
+    let mut behavior = PressBehavior::new(Some(&binding), pressed_at);
+
+    assert_eq!(
+        behavior.deadline(),
+        Some(pressed_at + WINDOW_SWITCH_THRESHOLD)
+    );
+    assert_eq!(behavior.release_action(), Some(&Action::SwitchAppWindow));
+    assert_eq!(
+        behavior.fire_long(pressed_at + WINDOW_SWITCH_THRESHOLD),
+        Some(Action::ShowAppWindows)
+    );
+    assert_eq!(behavior.release_action(), None);
+}
+
+#[test]
+fn ordinary_long_press_keeps_the_five_hundred_millisecond_threshold() {
+    let pressed_at = Instant::now();
+    let binding = long_press(Action::Copy, Action::Paste);
+    let behavior = PressBehavior::new(Some(&binding), pressed_at);
+
+    assert_eq!(behavior.deadline(), Some(pressed_at + LONG_PRESS_THRESHOLD));
+}
+
 fn recv_event(receiver: &mpsc::Receiver<ButtonRuntimeEvent>) -> ButtonRuntimeEvent {
     receiver
         .recv_timeout(Duration::from_secs(1))

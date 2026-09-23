@@ -252,6 +252,15 @@ impl Agent for TestAgent {
         false
     }
 
+    async fn action_ring_activate_window(
+        self,
+        _: TarpcContext,
+        _session_id: u64,
+        _index: u32,
+    ) -> Result<(), ActionRingCommandError> {
+        Err(ActionRingCommandError::SessionNotFound)
+    }
+
     async fn action_ring_cancel(self, _: TarpcContext, _session_id: u64) {
         unreachable!("profile capture must not drive the Actions Ring")
     }

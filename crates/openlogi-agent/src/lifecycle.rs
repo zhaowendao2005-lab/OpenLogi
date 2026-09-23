@@ -298,8 +298,19 @@ impl Armed {
                 Some(event) = watchers.next() => {
                     running.apply_watcher(event, &inventory_refresh).await;
                 }
-                Some((device_key, target)) = running.inputs.triggers.recv() => {
-                    running.begin_action_ring(device_key.as_deref(), target).await;
+                Some(trigger) = running.inputs.triggers.recv() => {
+                    match trigger {
+                        openlogi_agent_core::runtime::ActionRingTrigger::Actions { device_key, target } => {
+                            running.begin_action_ring(device_key.as_deref(), target).await;
+                        }
+                        openlogi_agent_core::runtime::ActionRingTrigger::SwitchAppWindow { device_key: _, target } => {
+                            let activated = running.inputs.ring.cycle_window_next(target);
+                            info!(?target, activated, "switched to next application window");
+                        }
+                        openlogi_agent_core::runtime::ActionRingTrigger::ShowAppWindows { device_key, target } => {
+                            running.begin_window_session(device_key.as_deref(), target).await;
+                        }
+                    }
                 }
                 else => break,
             }
@@ -402,6 +413,7 @@ impl Running {
     /// Publish one foreground-app change and cancel button lifecycles whose
     /// bindings were resolved against the previous app profile.
     async fn apply_foreground(&self, app: ForegroundUpdate) {
+        self.inputs.ring.observe_foreground();
         if self.orchestrator.lock().await.set_current_app(app) {
             self.inputs.dispatcher.cancel_all_buttons();
         }
@@ -437,6 +449,36 @@ impl Running {
                 "Actions Ring session opened"
             );
         }
+    }
+
+    /// Open an application-window session using the same trigger-time target
+    /// carried by the action lifecycle. A selection session deliberately does
+    /// not participate in the Actions Ring toggle path, so physical release
+    /// cannot dismiss it.
+    async fn begin_window_session(
+        &self,
+        device_key: Option<&str>,
+        target: openlogi_agent_core::runtime::ActionDispatchTarget,
+    ) {
+        let Some(session) = self
+            .orchestrator
+            .lock()
+            .await
+            .window_session(device_key, target)
+        else {
+            warn!(device_key = ?device_key, "window session has no active device");
+            return;
+        };
+        let invocation = self.inputs.ring.begin_window_selection(session);
+        info!(
+            session_id = invocation.session_id,
+            windows = invocation
+                .windows
+                .as_ref()
+                .map_or(0, |windows| windows.titles.len()),
+            ?target,
+            "application-window session opened"
+        );
     }
 
     /// Fold one Accessibility-grant change into the hook, then publish the

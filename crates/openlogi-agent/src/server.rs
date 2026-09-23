@@ -330,6 +330,19 @@ impl Agent for AgentServer {
         session_id: u64,
         slot: ActionRingSlot,
     ) -> Result<(), ActionRingCommandError> {
+        if let Some(target) = self.action_ring.activate_window(session_id, slot)? {
+            if !target.activate() {
+                warn!(
+                    session_id,
+                    ?slot,
+                    "application-window activation rejected by Windows"
+                );
+                return Err(ActionRingCommandError::WindowUnavailable);
+            }
+            info!(session_id, ?slot, "application-window activation accepted");
+            return Ok(());
+        }
+
         let activation = self
             .action_ring
             .activate(session_id, slot)
@@ -368,6 +381,31 @@ impl Agent for AgentServer {
         region: Option<openlogi_core::action_ring::InputRegion>,
     ) -> bool {
         self.action_ring.set_input_region(session_id, region)
+    }
+
+    async fn action_ring_activate_window(
+        self,
+        _: Context,
+        session_id: u64,
+        index: u32,
+    ) -> Result<(), ActionRingCommandError> {
+        let slot = ActionRingSlot::ALL
+            .get(index as usize)
+            .copied()
+            .ok_or(ActionRingCommandError::SlotEmpty)?;
+        let target = self
+            .action_ring
+            .activate_window(session_id, slot)?
+            .ok_or(ActionRingCommandError::WindowUnavailable)?;
+        if !target.activate() {
+            return Err(ActionRingCommandError::WindowUnavailable);
+        }
+        info!(
+            session_id,
+            index,
+            "Actions Ring window activation accepted; window brought to foreground"
+        );
+        Ok(())
     }
 
     async fn action_ring_cancel(self, _: Context, session_id: u64) {

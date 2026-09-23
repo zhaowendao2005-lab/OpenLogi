@@ -38,6 +38,10 @@ pub(crate) enum OverlayCommand {
         session_id: u64,
         slot: ActionRingSlot,
     },
+    ActivateWindow {
+        session_id: u64,
+        index: u32,
+    },
     Cancel {
         session_id: u64,
     },
@@ -45,7 +49,10 @@ pub(crate) enum OverlayCommand {
 
 impl OverlayCommand {
     pub(crate) const fn is_terminal(self) -> bool {
-        matches!(self, Self::Activate { .. } | Self::Cancel { .. })
+        matches!(
+            self,
+            Self::Activate { .. } | Self::ActivateWindow { .. } | Self::Cancel { .. }
+        )
     }
 }
 
@@ -280,6 +287,9 @@ async fn send_command(client: &AgentClient, command: OverlayCommand) -> bool {
         }
         OverlayCommand::Activate { session_id, slot } => {
             client.action_ring_activate(ctx, session_id, slot).await
+        }
+        OverlayCommand::ActivateWindow { session_id, index } => {
+            client.action_ring_activate_window(ctx, session_id, index).await
         }
         OverlayCommand::Cancel { session_id } => {
             client.action_ring_cancel(ctx, session_id).await.map(Ok)

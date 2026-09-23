@@ -25,6 +25,9 @@ const EVENT_QUEUE_CAPACITY: usize = 128;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Lets the worker observe the out-of-band shutdown channel even while idle.
 const SHUTDOWN_POLL_PERIOD: Duration = Duration::from_millis(10);
+/// Window switching deliberately has its own threshold. The generic
+/// `LongPressBinding` contract remains 500 ms for every existing action.
+const WINDOW_SWITCH_THRESHOLD: Duration = Duration::from_secs(1);
 
 /// Process-unique identity of one HID++ hardware capture incarnation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -191,16 +194,44 @@ enum PressBehavior {
         long: Action,
         deadline: Instant,
     },
+    /// The window-switch action has its one-second lifecycle threshold. It is
+    /// separate from `LongPressPending` so existing 500 ms bindings do not
+    /// change behavior.
+    WindowSwitchPending {
+        short: Action,
+        long: Action,
+        deadline: Instant,
+    },
     /// The long action fired; release must not also fire the short action.
     LongPressFired,
+    /// The window-selection ring opened; physical release only ends the press.
+    WindowSwitchFired,
 }
 
 impl PressBehavior {
     fn new(binding: Option<&Binding>, pressed_at: Instant) -> Self {
         match binding {
             None => Self::LifecycleOnly,
+            Some(Binding::Single(Action::SwitchAppWindow)) => Self::WindowSwitchPending {
+                short: Action::SwitchAppWindow,
+                long: Action::ShowAppWindows,
+                deadline: pressed_at + WINDOW_SWITCH_THRESHOLD,
+            },
             Some(Binding::Single(action)) => Self::Immediate(action.clone()),
             Some(binding @ Binding::Gesture(_)) => Self::Immediate(binding.click_action()),
+            Some(Binding::LongPress(binding))
+                if is_window_switch_action(binding.short())
+                    || is_window_switch_action(binding.long()) =>
+            {
+                let long = matches!(binding.long(), Action::SwitchAppWindow)
+                    .then_some(Action::ShowAppWindows)
+                    .unwrap_or_else(|| binding.long().clone());
+                Self::WindowSwitchPending {
+                    short: binding.short().clone(),
+                    long,
+                    deadline: pressed_at + WINDOW_SWITCH_THRESHOLD,
+                }
+            }
             Some(Binding::LongPress(binding)) => Self::LongPressPending {
                 short: binding.short().clone(),
                 long: binding.long().clone(),
@@ -211,36 +242,59 @@ impl PressBehavior {
 
     fn deadline(&self) -> Option<Instant> {
         match self {
-            Self::LongPressPending { deadline, .. } => Some(*deadline),
-            Self::LifecycleOnly | Self::Immediate(_) | Self::LongPressFired => None,
+            Self::LongPressPending { deadline, .. }
+            | Self::WindowSwitchPending { deadline, .. } => Some(*deadline),
+            Self::LifecycleOnly
+            | Self::Immediate(_)
+            | Self::LongPressFired
+            | Self::WindowSwitchFired => None,
         }
     }
 
     fn start_action(&self) -> Option<&Action> {
         match self {
             Self::Immediate(action) => Some(action),
-            Self::LifecycleOnly | Self::LongPressPending { .. } | Self::LongPressFired => None,
+            Self::LifecycleOnly
+            | Self::LongPressPending { .. }
+            | Self::WindowSwitchPending { .. }
+            | Self::LongPressFired
+            | Self::WindowSwitchFired => None,
         }
     }
 
     fn release_action(&self) -> Option<&Action> {
         match self {
-            Self::LongPressPending { short, .. } => Some(short),
-            Self::LifecycleOnly | Self::Immediate(_) | Self::LongPressFired => None,
+            Self::LongPressPending { short, .. } | Self::WindowSwitchPending { short, .. } => {
+                Some(short)
+            }
+            Self::LifecycleOnly
+            | Self::Immediate(_)
+            | Self::LongPressFired
+            | Self::WindowSwitchFired => None,
         }
     }
 
     fn fire_long(&mut self, now: Instant) -> Option<Action> {
-        let Self::LongPressPending { long, deadline, .. } = self else {
-            return None;
+        let (long, deadline, window_switch) = match self {
+            Self::LongPressPending { long, deadline, .. } => (long, deadline, false),
+            Self::WindowSwitchPending { long, deadline, .. } => (long, deadline, true),
+            _ => return None,
         };
         if now < *deadline {
             return None;
         }
         let action = long.clone();
-        *self = Self::LongPressFired;
+        *self = if window_switch {
+            Self::WindowSwitchFired
+        } else {
+            Self::LongPressFired
+        };
         Some(action)
     }
+}
+
+fn is_window_switch_action(action: &Action) -> bool {
+    matches!(action, Action::SwitchAppWindow | Action::ShowAppWindows)
 }
 
 impl ActivePress {

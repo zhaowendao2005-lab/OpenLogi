@@ -216,8 +216,10 @@ fn emit_settled_events(
         events.into_iter().partition(|event| match event {
             ButtonRuntimeEvent::Triggered { press, .. }
             | ButtonRuntimeEvent::Ended { press, .. } => {
-                matches!(press.behavior, PressBehavior::LongPressFired)
-                    && due_presses.contains(press.token())
+                matches!(
+                    press.behavior,
+                    PressBehavior::LongPressFired | PressBehavior::WindowSwitchFired
+                ) && due_presses.contains(press.token())
             }
             ButtonRuntimeEvent::Started(_) => false,
         });

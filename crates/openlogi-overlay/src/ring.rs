@@ -11,9 +11,10 @@ mod timing;
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Instant};
 
 use gpui::{
-    Bounds, Context, InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, WindowBackgroundAppearance,
-    WindowKind, WindowOptions, canvas, div, prelude::FluentBuilder as _, px,
+    Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+    Pixels, Point, Render, SharedString, StatefulInteractiveElement as _, Styled, Window,
+    WindowBackgroundAppearance, WindowKind, WindowOptions, canvas, div,
+    prelude::FluentBuilder as _, px,
 };
 #[cfg(any(not(target_os = "windows"), test))]
 use gpui::{Size, point};
@@ -52,6 +53,8 @@ pub(crate) struct RingView {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Publishes click-away identity until input ends, before the visual exit.
     showing: Option<ShowingRing>,
+    /// Receives Escape only for the interactive window picker.
+    focus_handle: Option<FocusHandle>,
 }
 
 impl RingView {
@@ -63,12 +66,18 @@ impl RingView {
     ) -> Self {
         let showing = live.showing(invocation.session_id);
         let speed = invocation.animation_speed;
+        let hovered = invocation
+            .windows
+            .as_ref()
+            .and_then(|windows| windows.selected)
+            .and_then(|selected| usize::try_from(selected).ok())
+            .and_then(|index| ActionRingSlot::ALL.get(index).copied());
         Self {
             region_publisher: None,
             region_lease: None,
             invocation,
             commands,
-            hovered: None,
+            hovered,
             motion: Motion::new(Instant::now(), speed),
             presented: false,
             frame_pending: false,
@@ -81,6 +90,7 @@ impl RingView {
             hidden_cursor: None,
             bounds: Rc::new(Cell::new(Bounds::default())),
             showing: Some(showing),
+            focus_handle: None,
         }
     }
 
@@ -112,11 +122,43 @@ impl RingView {
         self.invocation.session_id
     }
 
+    /// Whether this invocation needs keyboard focus for Escape cancellation.
+    pub(crate) fn is_window_picker(&self) -> bool {
+        self.invocation.windows.is_some()
+    }
+
+    /// Adopt a newer invocation in-place on the existing native window.
+    pub(crate) fn adopt(
+        &mut self,
+        invocation: ActionRingInvocation,
+        live: &Arc<ClickAwaySession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.showing = Some(live.showing(invocation.session_id));
+        self.invocation = invocation;
+        self.hovered = None;
+        self.presented = false;
+        self.frame_pending = false;
+        self.pointer_position = None;
+        self.warped_to = None;
+        self.hidden_cursor = None;
+        self.wheel.reset();
+        self.present(window, cx);
+    }
+
     /// Start the visual clock only after native placement has made us visible.
-    pub(crate) fn present(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn present(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.invocation.windows.is_some() {
+            let focus_handle = self.focus_handle.get_or_insert_with(|| cx.focus_handle());
+            focus_handle.focus(window, cx);
+        }
         self.presented = true;
         self.timing.begin("opening");
         self.motion = Motion::new(Instant::now(), self.invocation.animation_speed);
+        if let Some(slot) = self.hovered {
+            self.motion.select(Some(slot), Instant::now());
+        }
         cx.notify();
     }
     /// Commands take effect immediately; only presentation waits for the exit.
@@ -264,6 +306,12 @@ impl RingView {
         self.pointer_position
     }
 
+    fn hit_window_index(&self, position: Point<Pixels>) -> Option<u32> {
+        let frame = self.motion.frame(Instant::now(), false);
+        self.hit_slot(position, frame)
+            .and_then(|slot| u32::try_from(slot.index()).ok())
+    }
+
     fn click(
         &mut self,
         position: Point<Pixels>,
@@ -273,6 +321,21 @@ impl RingView {
     ) {
         cx.stop_propagation();
         if self.motion.is_closing() {
+            return;
+        }
+        if self.invocation.windows.is_some() {
+            if let Some(index) = self.hit_window_index(position) {
+                self.finish(
+                    Some(OverlayCommand::ActivateWindow {
+                        session_id: self.session_id(),
+                        index,
+                    }),
+                    window,
+                    cx,
+                );
+            } else {
+                self.cancel(window, cx);
+            }
             return;
         }
         let slot = if self.wheel.active() && Geometry::new(self.bounds.get()).in_ring(position) {
@@ -366,6 +429,10 @@ fn display_label(presentation: &ActionRingPresentation) -> SharedString {
 }
 
 impl Render for RingView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the ring render tree keeps geometry, interaction, and animation in one element boundary"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let frame = if self.presented {
             self.motion.frame(Instant::now(), cx.reduce_motion())
@@ -395,8 +462,21 @@ impl Render for RingView {
         let cancel_button =
             paint::cancel(self.hovered.is_some(), &ring_masks).opacity(frame.core_opacity);
 
+        let focus_handle = self
+            .focus_handle
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
         div()
             .id("ring-root")
+            .track_focus(&focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.invocation.windows.is_some()
+                    && event.keystroke.key.eq_ignore_ascii_case("escape")
+                {
+                    cx.stop_propagation();
+                    this.cancel(window, cx);
+                }
+            }))
             .relative()
             .size(px(WINDOW_SIZE))
             .child(

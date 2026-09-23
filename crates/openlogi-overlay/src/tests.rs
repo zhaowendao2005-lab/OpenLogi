@@ -39,6 +39,7 @@ fn invocation(slots: impl IntoIterator<Item = ActionRingSlot>) -> ActionRingInvo
             })
             .collect::<BTreeMap<_, _>>(),
         language: None,
+        windows: None,
     }
 }
 
@@ -210,7 +211,7 @@ fn vector_ring_reduced_motion_requests_no_animation_frames(cx: &mut TestAppConte
 fn closing_sends_once_and_its_timer_cannot_close_a_replacement(cx: &mut TestAppContext) {
     let (old, mut commands) = open_ring(cx, invocation(ActionRingSlot::ALL));
     cx.update(|cx| cx.set_reduce_motion(false));
-    old.update(cx, |view, _, cx| view.present(cx)).unwrap();
+    old.update(cx, RingView::present).unwrap();
     click(cx, old, point(px(180.0), px(180.0)));
     assert!(matches!(
         commands.try_recv().unwrap(),

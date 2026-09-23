@@ -43,8 +43,32 @@ pub enum ActionDispatchTarget {
     Keyboard,
 }
 
-/// Trigger payload retained until an Actions Ring slot is activated.
-pub type ActionRingTrigger = (Option<String>, ActionDispatchTarget);
+/// Trigger payload retained until an Actions Ring or window-picker session is
+/// opened. The target is captured with the physical trigger and never reread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActionRingTrigger {
+    /// Open the configured Actions Ring.
+    Actions {
+        /// Config key of the triggering device.
+        device_key: Option<String>,
+        /// Trigger-time application target.
+        target: ActionDispatchTarget,
+    },
+    /// Cycle one window and show passive MRU feedback.
+    SwitchAppWindow {
+        /// Config key of the triggering device.
+        device_key: Option<String>,
+        /// Trigger-time application target.
+        target: ActionDispatchTarget,
+    },
+    /// Open the interactive application-window picker.
+    ShowAppWindows {
+        /// Config key of the triggering device.
+        device_key: Option<String>,
+        /// Trigger-time application target.
+        target: ActionDispatchTarget,
+    },
+}
 
 impl ActionDispatchTarget {
     /// Windows delivers synthetic input to whatever holds the foreground, so
@@ -126,13 +150,24 @@ impl ActionExecutor {
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
         debug!(action = %action.label(), device_key = ?device_key, ?target, "dispatching action");
-        if matches!(action, Action::ShowActionsRing) {
-            if self
-                .action_ring
-                .send((device_key.map(str::to_owned), target))
-                .is_err()
-            {
-                warn!("Actions Ring runtime unavailable — trigger ignored");
+        let ring_trigger = match action {
+            Action::ShowActionsRing => Some(ActionRingTrigger::Actions {
+                device_key: device_key.map(str::to_owned),
+                target,
+            }),
+            Action::SwitchAppWindow => Some(ActionRingTrigger::SwitchAppWindow {
+                device_key: device_key.map(str::to_owned),
+                target,
+            }),
+            Action::ShowAppWindows => Some(ActionRingTrigger::ShowAppWindows {
+                device_key: device_key.map(str::to_owned),
+                target,
+            }),
+            _ => None,
+        };
+        if let Some(trigger) = ring_trigger {
+            if self.action_ring.send(trigger).is_err() {
+                warn!(action = %action.label(), "agent UI session runtime unavailable — trigger ignored");
             }
             return;
         }

@@ -114,25 +114,27 @@ impl RingPlacement {
             monitor as usize as u64 == u64::from(self.display_id),
             "ring monitor changed during window creation"
         );
-        set_bounds(
-            hwnd,
-            self.bounds(dpi),
-            SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
-        )?;
+        let picker = handle.update(cx, |view, _, _| view.is_window_picker())?;
+        let show_flags = if picker {
+            SWP_NOZORDER | SWP_SHOWWINDOW
+        } else {
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW
+        };
+        set_bounds(hwnd, self.bounds(dpi), show_flags)?;
         let mut rect = windows_sys::Win32::Foundation::RECT::default();
         ensure!(
             // SAFETY: the window is still owned on this thread and rect is writable.
             unsafe { GetWindowRect(hwnd, &raw mut rect) } != 0,
             "could not read ring input region"
         );
-        handle.update(cx, |view, _, cx| {
+        handle.update(cx, |view, window, cx| {
             view.publish_input_region(openlogi_core::action_ring::InputRegion {
                 x: f64::from(rect.left),
                 y: f64::from(rect.top),
                 width: f64::from(rect.right - rect.left),
                 height: f64::from(rect.bottom - rect.top),
             });
-            view.present(cx);
+            view.present(window, cx);
         })
     }
 }

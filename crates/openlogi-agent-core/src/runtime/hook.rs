@@ -283,8 +283,12 @@ fn handle_button(
                     .ok()
                     .map(|m| resolve_gesture_click(&m.gestures, id));
                 if let Some(action) = action {
-                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
-                    dispatcher.try_dispatch_while_pressed(&press, &action);
+                    if is_gesture_window_cycle(&action) {
+                        warn!(button = %id, "window cycling is ignored for gesture activation");
+                    } else {
+                        info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                        dispatcher.try_dispatch_while_pressed(&press, &action);
+                    }
                 }
             }
             dispatcher.try_hook_button_up(id);
@@ -372,8 +376,12 @@ fn handle_moved(
                 .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
         });
         if let Some(action) = action {
-            info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-            dispatcher.try_dispatch_while_pressed(&press, &action);
+            if is_gesture_window_cycle(&action) {
+                warn!(button = %button, "window cycling is ignored for gesture activation");
+            } else {
+                info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
+                dispatcher.try_dispatch_while_pressed(&press, &action);
+            }
         }
     }
     EventDisposition::PassThrough
@@ -636,6 +644,10 @@ fn resolve_gesture_click(
 /// the hook should pass the event through to the OS rather than suppress and
 /// re-synthesise it. For Back/Forward this keeps the genuine hardware button
 /// 4/5 intact instead of round-tripping it through synthesis.
+fn is_gesture_window_cycle(action: &Action) -> bool {
+    matches!(action, Action::SwitchAppWindow)
+}
+
 fn is_native_click(id: ButtonId, action: &Action) -> bool {
     matches!(
         (id, action),
