@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "此裝置使用另一種連線時支援滾�
 smartshift = "SmartShift"
 
 [actions]
+invalid_shortcut = "請輸入有效的快捷鍵，例如 Cmd+Shift+P。"
 bind_control = "綁定 %{name}"
 bind_control_in_app = "在 %{app} 中綁定 %{name}"
 unbound = "未綁定"

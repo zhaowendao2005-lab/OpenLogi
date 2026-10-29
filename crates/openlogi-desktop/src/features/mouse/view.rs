@@ -13,14 +13,14 @@ use gpui_component::{
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection};
+use openlogi_core::binding::{Action, ButtonId, GestureDirection, KeyCombo};
 
 use super::geometry::{
     LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
     default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
-use super::inspector::{BindingInspectorData, binding_inspector};
+use super::inspector::{BindingInspectorData, binding_inspector, selected_shortcut};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::profiles::{friendly_app_name, profile_canvas_status};
@@ -120,6 +120,18 @@ impl<'a> MouseWorkspaceData<'a> {
     }
 }
 
+/// Identity of the binding whose shortcut text is being edited. Include the
+/// persisted chord so external binding changes reseed the input, but ordinary
+/// draft edits do not overwrite it on every render.
+#[derive(PartialEq, Eq)]
+struct ShortcutDraftScope {
+    device: Option<DeviceKey>,
+    app: Option<String>,
+    control: Option<MouseControlId>,
+    direction: Option<GestureDirection>,
+    chord: Option<KeyCombo>,
+}
+
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
     focus_handle: FocusHandle,
@@ -130,6 +142,9 @@ pub struct MouseModelView {
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
     action_search: Entity<InputState>,
+    shortcut_input: Entity<InputState>,
+    shortcut_scope: Option<ShortcutDraftScope>,
+    shortcut_error: bool,
     _state_obs: Subscription,
 }
 
@@ -140,6 +155,17 @@ impl MouseModelView {
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("actions.search_actions")));
         cx.subscribe(&action_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        let shortcut_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr!("action_ring.shortcut_e_g_cmd_plus_shift_plus_p"))
+        });
+        cx.subscribe(&shortcut_input, |view, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) && view.shortcut_error {
+                view.shortcut_error = false;
                 cx.notify();
             }
         })
@@ -160,6 +186,9 @@ impl MouseModelView {
             gesture_active_dir: None,
             action_picker_open: false,
             action_search,
+            shortcut_input,
+            shortcut_scope: None,
+            shortcut_error: false,
             _state_obs: state_obs,
         }
     }
@@ -177,6 +206,63 @@ impl MouseModelView {
 
     pub(super) fn close_action_picker(&mut self) {
         self.action_picker_open = false;
+        self.shortcut_scope = None;
+        self.shortcut_error = false;
+    }
+
+    pub(super) fn set_shortcut_error(&mut self) {
+        self.shortcut_error = true;
+    }
+
+    fn sync_shortcut_draft(
+        &mut self,
+        scope: ShortcutDraftScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shortcut_scope.as_ref() == Some(&scope) {
+            return;
+        }
+        let seed = scope
+            .chord
+            .as_ref()
+            .map_or_else(String::new, KeyCombo::rendered_label);
+        self.shortcut_scope = Some(scope);
+        self.shortcut_error = false;
+        if self.shortcut_input.read(cx).value().as_ref() != seed {
+            self.shortcut_input
+                .update(cx, |input, cx| input.set_value(seed, window, cx));
+        }
+    }
+
+    fn inspector_data<'a>(&self, data: &'a MouseWorkspaceData<'_>) -> BindingInspectorData<'a> {
+        BindingInspectorData {
+            selected: self.selected,
+            gesture_direction: self.gesture_active_dir,
+            action_picker_open: self.action_picker_open,
+            shortcut_error: self.shortcut_error,
+            bindings: data.bindings,
+            gesture_maps: data.gesture_maps,
+            dpi_gestures: data.dpi_gestures,
+            editing_app: data.editing_app.as_deref(),
+            overridden: data.overridden,
+        }
+    }
+
+    fn shortcut_draft_scope(&self, cx: &App) -> ShortcutDraftScope {
+        let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
+        let data = MouseWorkspaceData::read(cx)
+            .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
+        let inspector = self.inspector_data(&data);
+        ShortcutDraftScope {
+            device: data.device_key.clone(),
+            app: AppState::try_read(cx)
+                .and_then(AppState::editing_app)
+                .map(str::to_owned),
+            control: self.selected,
+            direction: self.gesture_active_dir,
+            chord: selected_shortcut(&inspector),
+        }
     }
 
     fn reset_for_device(&mut self, device_key: Option<DeviceKey>) {
@@ -229,29 +315,32 @@ impl Render for MouseModelView {
             window,
             cx,
         );
+        crate::ui::components::localize_placeholder(
+            &self.shortcut_input,
+            tr!("action_ring.shortcut_e_g_cmd_plus_shift_plus_p"),
+            window,
+            cx,
+        );
+        let device_key = AppState::try_read(cx)
+            .and_then(AppState::current_record)
+            .map(DeviceRecord::device_key);
+        self.reset_for_device(device_key);
+        let scope = self.shortcut_draft_scope(cx);
+        self.sync_shortcut_draft(scope, window, cx);
+
         let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
-        let MouseWorkspaceData {
-            device_key,
-            asset,
-            active,
-            bindings,
-            gesture_maps,
-            glow,
-            thumbwheel,
-            dpi_gestures,
-            editing_app,
-            overridden,
-        } = MouseWorkspaceData::read(cx)
+        let data = MouseWorkspaceData::read(cx)
             .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
 
-        self.reset_for_device(device_key);
-
-        let gesture_buttons: Vec<ButtonId> = gesture_maps
+        let gesture_buttons: Vec<ButtonId> = data
+            .gesture_maps
             .keys()
             .copied()
             .filter(|button| {
-                editing_app.is_none()
-                    || !overridden.is_some_and(|overrides| overrides.contains_key(button))
+                data.editing_app.is_none()
+                    || !data
+                        .overridden
+                        .is_some_and(|overrides| overrides.contains_key(button))
             })
             .collect();
 
@@ -264,10 +353,10 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(data.asset, viewport_w, viewport_h, data.thumbwheel);
         let canvas_h = mouse_h;
 
-        let highlight = self.hovered.or(active).or(self.selected);
+        let highlight = self.hovered.or(data.active).or(self.selected);
         let view = cx.entity();
         let hovered = self.hovered;
         let profile_status = profile_canvas_status(cx);
@@ -275,7 +364,8 @@ impl Render for MouseModelView {
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
         let leader_canvas = leader_canvas(hotspots, labels, highlight, mouse_left, mouse_w);
-        let breathing_art = breathing_art(asset, mouse_left, mouse_w, mouse_h, glow);
+        let breathing_art =
+            breathing_art(data.asset, mouse_left, mouse_w, mouse_h, data.glow.clone());
         let model = ModelRect {
             left: mouse_left,
             width: mouse_w,
@@ -285,7 +375,7 @@ impl Render for MouseModelView {
             &hotspots_outer,
             model,
             hovered,
-            active,
+            data.active,
             self.selected,
             &view,
         );
@@ -296,12 +386,12 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons);
+                let binding = binding_label_for_control(label.id, data.bindings, &gesture_buttons);
                 label_control(
                     idx,
                     *label,
                     binding,
-                    hovered == Some(label.id) || active == Some(label.id),
+                    hovered == Some(label.id) || data.active == Some(label.id),
                     model,
                     self.selected == Some(label.id),
                     &view,
@@ -310,17 +400,9 @@ impl Render for MouseModelView {
             .child(hotspots_layer);
 
         let inspector = binding_inspector(
-            BindingInspectorData {
-                selected: self.selected,
-                gesture_direction: self.gesture_active_dir,
-                action_picker_open: self.action_picker_open,
-                bindings,
-                gesture_maps,
-                dpi_gestures,
-                editing_app: editing_app.as_deref(),
-                overridden,
-            },
+            self.inspector_data(&data),
             &self.action_search,
+            &self.shortcut_input,
             &view,
             cx,
         );

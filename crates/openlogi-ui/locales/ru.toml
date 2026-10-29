@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "Устройство поддерживае
 smartshift = "SmartShift"
 
 [actions]
+invalid_shortcut = "Enter a supported shortcut, e.g., Cmd+Shift+P."
 bind_control = "Назначить %{name}"
 bind_control_in_app = "Назначить %{name} в %{app}"
 unbound = "Не назначено"

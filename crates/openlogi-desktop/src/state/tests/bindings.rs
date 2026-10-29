@@ -75,6 +75,39 @@ fn a_binding_committed_in_a_per_app_profile_leaves_the_global_one_alone() {
     );
 }
 
+#[test]
+fn mouse_shortcut_is_saved_in_the_selected_profile() {
+    let action = Action::CustomShortcut("Cmd+Shift+P".parse().unwrap());
+    let mut state = state_with_a_known_mouse();
+    let _ = state.commit_binding(ButtonId::Forward, action.clone());
+    assert_eq!(
+        state
+            .config
+            .stored_bindings(KNOWN_MOUSE_KEY)
+            .get(&ButtonId::Forward),
+        Some(&Binding::Single(action.clone()))
+    );
+
+    let _ = state.set_editing_app(Some("com.apple.Safari".into()));
+    let other = Action::CustomShortcut("Ctrl+P".parse().unwrap());
+    let _ = state.commit_binding(ButtonId::Forward, other.clone());
+    assert_eq!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari")
+            .and_then(|overrides| overrides.get(&ButtonId::Forward)),
+        Some(&other)
+    );
+    assert_eq!(
+        state
+            .config
+            .stored_bindings(KNOWN_MOUSE_KEY)
+            .get(&ButtonId::Forward),
+        Some(&Binding::Single(action)),
+        "the app-specific shortcut must not replace the global one"
+    );
+}
+
 fn ring_action(action: Action) -> RingAction {
     RingAction::new(action).expect("test action must be valid in the Actions Ring")
 }

@@ -12,7 +12,7 @@ use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{Action, ButtonId, GestureDirection, KeyCombo, default_binding};
 
 use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
@@ -28,11 +28,37 @@ use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
+/// Shortcut on the action currently shown by the inspector (if any). A
+/// per-app inherited gesture summary is not a single editable action.
+pub(super) fn selected_shortcut(data: &BindingInspectorData<'_>) -> Option<KeyCombo> {
+    let MouseControlId::Button(button) = data.selected? else {
+        return None;
+    };
+    let action = match data.gesture_maps.get(&button) {
+        Some(map) if data.editing_app.is_none() => gesture_action(
+            map,
+            button,
+            data.gesture_direction.unwrap_or(GestureDirection::Click),
+        ),
+        Some(_) if !data.overridden.is_some_and(|map| map.contains_key(&button)) => return None,
+        _ => data
+            .bindings
+            .get(&button)
+            .cloned()
+            .unwrap_or_else(|| default_binding(button)),
+    };
+    match action {
+        Action::CustomShortcut(combo) => Some(combo),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct BindingInspectorData<'a> {
     pub selected: Option<MouseControlId>,
     pub gesture_direction: Option<GestureDirection>,
     pub action_picker_open: bool,
+    pub shortcut_error: bool,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub dpi_gestures: bool,
@@ -44,12 +70,15 @@ pub(super) struct BindingInspectorData<'a> {
 struct ActionPickerContext<'a> {
     open: bool,
     search: &'a Entity<InputState>,
+    shortcut: &'a Entity<InputState>,
+    shortcut_error: bool,
     view: &'a Entity<MouseModelView>,
 }
 
 pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
     action_search: &Entity<InputState>,
+    shortcut_input: &Entity<InputState>,
     view: &Entity<MouseModelView>,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
@@ -57,6 +86,8 @@ pub(super) fn binding_inspector(
     let picker = ActionPickerContext {
         open: data.action_picker_open,
         search: action_search,
+        shortcut: shortcut_input,
+        shortcut_error: data.shortcut_error,
         view,
     };
     let body = match data.selected {
@@ -176,6 +207,7 @@ fn button_inspector(
             pal,
         ))
         .child(current_action_card(&action, picker, pal))
+        .child(shortcut_editor(picker, &on_pick, pal))
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
@@ -255,6 +287,7 @@ fn inherited_gesture_inspector(
             pal,
         ))
         .child(gesture_summary_card(picker, pal))
+        .child(shortcut_editor(picker, &on_pick, pal))
         .child(div().text_caption().text_color(pal.text_muted).child(tr!(
             "actions.app_profile_action_replaces_gestures",
             app => app.to_string()
@@ -321,6 +354,7 @@ fn gesture_inspector(
             pal,
         ))
         .child(current_action_card(&current, picker, pal))
+        .child(shortcut_editor(picker, &on_pick, pal))
         .child(
             control_button("inspector-single-action")
                 .w_full()
@@ -557,6 +591,55 @@ fn current_action_card(
     )
 }
 
+fn shortcut_editor(picker: ActionPickerContext<'_>, on_pick: &PickFn, pal: Palette) -> gpui::Div {
+    let input = picker.shortcut.clone();
+    let view = picker.view.clone();
+    let on_pick = on_pick.clone();
+    v_flex()
+        .gap_1()
+        .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(control_input(picker.shortcut).cleanable(true)),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "inspector-shortcut-submit".into())
+                        .child(
+                            control_button("inspector-add-shortcut")
+                                .label(tr!("common.add"))
+                                .on_click(move |_, window, cx| {
+                                    let text = input.read(cx).value().to_string();
+                                    match text.parse::<KeyCombo>() {
+                                        Ok(combo) => {
+                                            (on_pick)(Action::CustomShortcut(combo), window, cx);
+                                        }
+                                        Err(_) => view.update(cx, |view, cx| {
+                                            view.set_shortcut_error();
+                                            cx.notify();
+                                        }),
+                                    }
+                                }),
+                        ),
+                ),
+        )
+        .when(picker.shortcut_error, |section| {
+            section.child(
+                div()
+                    .id("inspector-shortcut-error")
+                    .role(Role::Alert)
+                    .text_caption()
+                    .text_color(pal.text_primary)
+                    .child(tr!("actions.invalid_shortcut")),
+            )
+        })
+}
+
 fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> impl IntoElement {
     selection_card(
         "inspector-current-gesture-summary",
@@ -708,6 +791,45 @@ mod tests {
                 ButtonId::GestureButton,
                 ButtonId::HapticPanel,
             ]
+        );
+    }
+
+    #[test]
+    fn shortcut_seed_tracks_the_visible_button_or_gesture_action() {
+        let combo: KeyCombo = "Cmd+Shift+P".parse().unwrap();
+        let bindings = BTreeMap::from([(ButtonId::Forward, Action::CustomShortcut(combo.clone()))]);
+        let gesture_maps = BTreeMap::from([(
+            ButtonId::Back,
+            BTreeMap::from([(GestureDirection::Up, Action::CustomShortcut(combo.clone()))]),
+        )]);
+        let data = BindingInspectorData {
+            selected: Some(MouseControlId::Button(ButtonId::Forward)),
+            gesture_direction: None,
+            action_picker_open: false,
+            shortcut_error: false,
+            bindings: &bindings,
+            gesture_maps: &gesture_maps,
+            dpi_gestures: false,
+            editing_app: None,
+            overridden: None,
+        };
+        assert_eq!(selected_shortcut(&data), Some(combo.clone()));
+        assert_eq!(
+            selected_shortcut(&BindingInspectorData {
+                selected: Some(MouseControlId::Button(ButtonId::Back)),
+                gesture_direction: Some(GestureDirection::Up),
+                ..data
+            }),
+            Some(combo),
+        );
+        assert_eq!(
+            selected_shortcut(&BindingInspectorData {
+                selected: Some(MouseControlId::Button(ButtonId::Back)),
+                editing_app: Some("Safari"),
+                ..data
+            }),
+            None,
+            "an inherited gesture summary is not a single shortcut",
         );
     }
 

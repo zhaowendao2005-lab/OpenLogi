@@ -1,4 +1,4 @@
-use gpui::{TestAppContext, size};
+use gpui::{Modifiers, TestAppContext, size};
 use openlogi_core::binding::default_binding;
 use openlogi_core::config::Config;
 
@@ -88,6 +88,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
                 gesture_direction: Some(GestureDirection::Up),
                 action_picker_open: false,
+                shortcut_error: false,
                 bindings: &bindings,
                 gesture_maps: &gesture_maps,
                 dpi_gestures: false,
@@ -95,6 +96,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 overridden: None,
             },
             &view.action_search,
+            &view.shortcut_input,
             &entity,
             cx,
         );
@@ -120,6 +122,97 @@ fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
 
         assert!(!view.action_picker_open);
     });
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn shortcut_field_validates_and_commits_to_the_selected_button(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    view.update(cx, |view, cx| {
+        view.select(MouseControlId::Button(ButtonId::Forward));
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let submit = cx
+        .debug_bounds("inspector-shortcut-submit")
+        .expect("a selected button exposes shortcut configuration")
+        .center();
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.shortcut_input.update(cx, |input, cx| {
+                input.set_value("Ctrl+", window, cx);
+            });
+        });
+    });
+    cx.simulate_click(submit, Modifiers::default());
+    assert!(cx.update(|_, cx| view.read(cx).shortcut_error));
+    assert_eq!(
+        cx.update(|_, cx| AppState::try_read(cx)
+            .unwrap()
+            .button_bindings()
+            .get(&ButtonId::Forward)
+            .cloned()),
+        Some(default_binding(ButtonId::Forward)),
+        "an invalid chord must not replace the binding",
+    );
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.shortcut_input.update(cx, |input, cx| {
+                input.replace_all("cmd+shift+p", window, cx);
+            });
+        });
+    });
+    cx.run_until_parked();
+    assert!(!cx.update(|_, cx| view.read(cx).shortcut_error));
+    cx.simulate_click(submit, Modifiers::default());
+    let combo: KeyCombo = "Cmd+Shift+P".parse().unwrap();
+    assert_eq!(
+        cx.update(|_, cx| AppState::try_read(cx)
+            .unwrap()
+            .button_bindings()
+            .get(&ButtonId::Forward)
+            .cloned()),
+        Some(Action::CustomShortcut(combo)),
+    );
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).shortcut_input.read(cx).value().to_string()),
+        "Cmd+Shift+P"
+    );
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn shortcut_draft_is_reseeded_for_another_button(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    view.update(cx, |view, cx| {
+        view.select(MouseControlId::Button(ButtonId::Back));
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.shortcut_input.update(cx, |input, cx| {
+                input.set_value("Cmd+P", window, cx);
+            });
+            view.select(MouseControlId::Button(ButtonId::Forward));
+            cx.notify();
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.update(|_, cx| view.read(cx).shortcut_input.read(cx).value().is_empty()));
+
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
